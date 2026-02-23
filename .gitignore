@@ -1,0 +1,30 @@
+# Secrets
+.env
+
+# Vector DB — ignore content but keep the placeholder so the folder exists after clone
+chroma_db/*
+!chroma_db/.gitkeep
+chroma_db_test/
+
+# BM25 index — rebuilt by ingest.py
+bm25_index/*
+!bm25_index/.gitkeep
+
+# Raw source documents — PDF is copyrighted, HTMLs are scraped data
+data/raw/*
+!data/raw/.gitkeep
+
+# Processed artifacts — rebuilt by ingest.py
+data/processed/chunks.json
+data/processed/index_meta.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS
+.DS_Store
+
+# Working documents — not part of the project
+GITHUB_UPLOAD_CHECKLIST.md

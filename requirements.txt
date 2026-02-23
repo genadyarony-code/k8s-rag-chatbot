@@ -1,0 +1,40 @@
+# Core
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+streamlit==1.39.0
+pydantic==2.9.0
+pydantic-settings==2.5.0
+
+# LangGraph / LangChain
+langgraph==0.2.35
+langchain==0.3.0
+langchain-openai==0.2.0
+
+# OpenAI
+openai==1.51.0
+tiktoken==0.8.0
+
+# Vector DB
+chromadb==0.5.15
+
+# BM25 fallback
+rank-bm25==0.2.2
+numpy==1.26.4
+
+# PDF parsing
+pymupdf==1.24.11
+pdfplumber==0.11.4
+docling==2.5.0
+
+# HTML parsing
+beautifulsoup4==4.12.3
+lxml==5.3.0
+requests==2.32.3
+
+# Testing
+pytest==8.3.0
+pytest-asyncio==0.24.0
+httpx==0.27.0
+
+# Dev
+python-dotenv==1.0.1

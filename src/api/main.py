@@ -1,0 +1,182 @@
+"""
+Three endpoints: POST /chat for questions, GET /health for index and flag status,
+and POST /reset/{session_id} to clear conversation history.
+
+On startup the server checks that the index is ready before accepting any traffic.
+A server that starts but serves garbage because the index is missing is harder to
+debug than one that simply refuses to start, so check_index_health() crashes loudly.
+
+Streaming mode bypasses LangGraph.invoke() and calls retrieve_node() directly.
+This gives tighter control over the token loop; routing it through the graph
+wrapper would complicate the SSE generator for no real benefit.
+"""
+
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from contextlib import asynccontextmanager
+from pathlib import Path
+import json
+import os
+
+from openai import OpenAI
+import chromadb
+
+from src.api.schemas import ChatRequest, ChatResponse, HealthResponse
+from src.agent.graph import graph
+from src.agent.memory import session_memory
+from src.config.feature_flags import FEATURE_FLAGS
+from src.config.settings import settings
+
+
+def check_index_health():
+    """
+    Checks that the index is built and healthy before the server takes any traffic.
+    Raises RuntimeError (which crashes startup) if the manifest is missing or if
+    either index reports a failure. Loud crash beats silent wrong answers.
+    """
+    manifest = "data/processed/index_meta.json"
+
+    if not os.path.exists(manifest):
+        raise RuntimeError(
+            "\n❌ Index manifest not found!"
+            "\n   Run: python scripts/ingest.py"
+        )
+
+    with open(manifest) as f:
+        meta = json.load(f)
+
+    if not meta.get("chroma_ok") or not meta.get("bm25_ok"):
+        raise RuntimeError(
+            f"\n❌ Index is in an inconsistent state!"
+            f"\n   chroma_ok={meta.get('chroma_ok')} | bm25_ok={meta.get('bm25_ok')}"
+            f"\n   Run: python scripts/ingest.py --force"
+        )
+
+    print(
+        f"\033[92m✓ Index OK | "
+        f"chunks={meta.get('chunk_count')} | "
+        f"version={meta.get('chunk_schema_version')} | "
+        f"built={meta.get('built_at', 'unknown')}\033[0m"
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    check_index_health()   # crashes with RuntimeError if index is not ready
+    yield
+    # shutdown cleanup (e.g. close DB connections) goes here if needed
+
+
+app = FastAPI(title="K8s RAG Chatbot", version="1.0.0", lifespan=lifespan)
+
+
+@app.post("/chat")
+async def chat(request: ChatRequest):
+    """
+    Main chat endpoint. Returns either a streaming SSE response or a
+    full JSON response depending on the FF_USE_STREAMING feature flag.
+
+    Streaming (SSE) response format:
+        data: {"token": "...", "done": false}   ← one per token
+        data: {"sources": [...], "done": true}  ← final signal
+
+    Batch response format: ChatResponse JSON.
+    """
+    if FEATURE_FLAGS["use_streaming"]:
+        return StreamingResponse(
+            _stream_response(request),
+            media_type="text/event-stream"
+        )
+    else:
+        # Batch mode — full round-trip through LangGraph
+        result = graph.invoke(
+            {"question": request.question, "session_id": request.session_id},
+            config={"configurable": {"thread_id": request.session_id}}
+        )
+        return ChatResponse(
+            answer=result["answer"],
+            sources=result["sources"],
+            session_id=request.session_id
+        )
+
+
+async def _stream_response(request: ChatRequest):
+    """
+    Async generator for the streaming chat path. Runs retrieval, then streams
+    GPT tokens one by one via SSE. Sends a final event with sources and done=True
+    when the stream ends, then saves the full exchange to session memory.
+    """
+    from src.agent.nodes import retrieve_node
+    from src.agent.prompts import build_prompt
+
+    # Step 1: Retrieval (includes query routing + session history loading)
+    state = retrieve_node({
+        "question": request.question,
+        "session_id": request.session_id
+    })
+
+    # Step 2: Generation
+    if not FEATURE_FLAGS["use_openai"]:
+        # Degraded mode: return raw retrieved chunks without calling the LLM
+        raw = "\n\n".join([f"[{c['section_title']}]\n{c['content']}" for c in state["context"]])
+        yield f"data: {json.dumps({'token': raw, 'done': False})}\n\n"
+    else:
+        messages = build_prompt(state["question"], state["context"], state["history"])
+        client = OpenAI(api_key=settings.openai_api_key)
+
+        stream = client.chat.completions.create(
+            model=settings.llm_model,
+            messages=messages,
+            temperature=0.1,
+            stream=True
+        )
+
+        full_answer = ""
+        for chunk in stream:
+            token = chunk.choices[0].delta.content or ""
+            if token:
+                full_answer += token
+                yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+
+        # Persist the complete answer to memory after the stream finishes
+        if FEATURE_FLAGS["use_session_memory"]:
+            session_memory.add(request.session_id, request.question, full_answer)
+
+    # Step 3: Send sources as the completion signal
+    sources = list(set(c["source"] for c in state["context"]))
+    yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
+
+
+@app.get("/health", response_model=HealthResponse)
+async def health():
+    """
+    System health check — used by the Streamlit sidebar and Docker healthcheck.
+    Returns live status of ChromaDB, BM25 index, and all feature flags.
+    Status is "ok" if at least one index is available, "degraded" otherwise.
+    """
+    chroma_ok = False
+    try:
+        c = chromadb.PersistentClient(path=settings.chroma_db_path)
+        c.get_collection(settings.chroma_collection_name)
+        chroma_ok = True
+    except Exception:
+        pass
+
+    bm25_ok = Path("./bm25_index/bm25.pkl").exists()
+
+    return HealthResponse(
+        status="ok" if (chroma_ok or bm25_ok) else "degraded",
+        chroma_ok=chroma_ok,
+        bm25_ok=bm25_ok,
+        feature_flags=FEATURE_FLAGS
+    )
+
+
+@app.post("/reset/{session_id}")
+async def reset_session(session_id: str):
+    """
+    Clear all stored conversation history for the given session.
+    Useful for debugging and for the UI's "Reset Session" button.
+    """
+    session_memory.clear(session_id)
+    return {"status": "cleared", "session_id": session_id}
