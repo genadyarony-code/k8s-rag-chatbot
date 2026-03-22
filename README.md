@@ -9,7 +9,7 @@
 
 ---
 [![CI](https://github.com/genadyarony-code/k8s-rag-chatbot/actions/workflows/ci.yml/badge.svg)](https://github.com/genadyarony-code/k8s-rag-chatbot/actions/workflows/ci.yml)
-[![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![LangGraph](https://img.shields.io/badge/LangGraph-Production-green.svg)](https://github.com/langchain-ai/langgraph)
 [![FastAPI](https://img.shields.io/badge/FastAPI-SSE-009688.svg)](https://fastapi.tiangolo.com/)
@@ -98,7 +98,7 @@ Three documents chosen to cover distinct user intents:
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Python 3.13+
+- Python 3.12+
 - Docker + Docker Compose
 - OpenAI API key
 

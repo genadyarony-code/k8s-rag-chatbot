@@ -2,7 +2,6 @@
 chroma_db/
 bm25_index/
 data/raw/
-data/processed/
 
 # Dev / test — not needed in production images
 tests/

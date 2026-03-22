@@ -1,7 +1,13 @@
-FROM python:3.13-slim
+FROM python:3.12-slim
 
 WORKDIR /app
+
+# build-essential provides gcc, g++, make and C headers needed for packages
+# that compile C extensions (numpy, tiktoken, chroma-hnswlib)
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/

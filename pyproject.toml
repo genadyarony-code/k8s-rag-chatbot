@@ -4,13 +4,13 @@ version = "1.0.0"
 description = "Production-grade RAG system for Kubernetes documentation"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 authors = [{ name = "Yaron Genad", email = "genad.yaron.y@gmail.com" }]
 keywords = ["rag", "kubernetes", "langgraph", "chromadb", "fastapi"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]

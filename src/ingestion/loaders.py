@@ -157,6 +157,13 @@ def load_pdf_hybrid(path: Path, doc_type: str) -> RawDocument:
     end = end if end != -1 else page_count - 1
     end = min(end, page_count - 1)  # safety clamp in case the PDF has fewer pages
 
+    # Open pdfplumber once for all pages — reopening per page is O(n²) on file size
+    try:
+        plumber_pdf = pdfplumber.open(str(path))
+    except Exception as e:
+        logging.warning(f"pdfplumber failed to open {path.name}: {e}")
+        plumber_pdf = None
+
     for page_num in range(start, end + 1):
         page = doc[page_num]
         blocks = page.get_text("blocks", sort=True, flags=11)  # type: ignore[arg-type]
@@ -174,10 +181,10 @@ def load_pdf_hybrid(path: Path, doc_type: str) -> RawDocument:
         content_parts.append("\n\n".join(page_blocks))
 
         # pdfplumber only for tables — PyMuPDF handles text
-        try:
-            with pdfplumber.open(str(path)) as pdf:
-                if page_num < len(pdf.pages):
-                    plumber_page = pdf.pages[page_num]
+        if plumber_pdf is not None:
+            try:
+                if page_num < len(plumber_pdf.pages):
+                    plumber_page = plumber_pdf.pages[page_num]
                     tables = plumber_page.find_tables({
                         "vertical_strategy": "lines",
                         "horizontal_strategy": "lines",
@@ -197,8 +204,11 @@ def load_pdf_hybrid(path: Path, doc_type: str) -> RawDocument:
                             f"\n[TABLE {idx + 1} on page {display_page}]\n"
                             f"{md_table}\n[/TABLE]\n"
                         )
-        except Exception as e:
-            logging.warning(f"pdfplumber failed on page {display_page}: {e}")
+            except Exception as e:
+                logging.warning(f"pdfplumber failed on page {display_page}: {e}")
+
+    if plumber_pdf is not None:
+        plumber_pdf.close()
 
     return RawDocument(
         content="\n".join(content_parts),

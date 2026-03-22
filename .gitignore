@@ -14,6 +14,9 @@ bm25_index/*
 data/raw/*
 !data/raw/.gitkeep
 
+# Local raw data folder (same content, gitignored entirely)
+rawData/
+
 # Processed artifacts — rebuilt by ingest.py
 data/processed/chunks.json
 data/processed/index_meta.json

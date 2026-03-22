@@ -13,6 +13,7 @@ langchain-openai==0.2.0
 # OpenAI
 openai==1.51.0
 tiktoken==0.8.0
+httpx==0.27.2
 
 # Vector DB
 chromadb==0.5.15
@@ -21,10 +22,10 @@ chromadb==0.5.15
 rank-bm25==0.2.2
 numpy==1.26.4
 
-# PDF parsing
+# PDF parsing (docling is an optional upgrade but pulls ~1GB of torch;
+# the fallback to PyMuPDF + pdfplumber is used automatically when it is absent)
 pymupdf==1.24.11
 pdfplumber==0.11.4
-docling==2.5.0
 
 # HTML parsing
 beautifulsoup4==4.12.3
