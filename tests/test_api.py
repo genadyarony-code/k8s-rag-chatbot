@@ -7,10 +7,10 @@ from unittest.mock import patch, MagicMock
 @pytest.fixture
 def client_with_mock_index(tmp_path):
     """
-    יוצר TestClient עם index_meta.json mock —
-    כדי שה-lifespan health check יעבור בלי index אמיתי
+    Creates a TestClient with a mocked index_meta.json so the lifespan
+    health check passes without a real index on disk.
     """
-    # יוצר manifest זמני
+    # Write a temporary manifest so check_index_health doesn't raise
     manifest_dir = tmp_path / "data" / "processed"
     manifest_dir.mkdir(parents=True)
     manifest = manifest_dir / "index_meta.json"

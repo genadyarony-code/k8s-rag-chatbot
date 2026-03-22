@@ -84,13 +84,12 @@ if prompt := st.chat_input("Ask about Kubernetes... e.g. 'Why is my Pod in Crash
         sources = []
         error_occurred = False
 
-        # שיפור חווית משתמש: הצגת אינדיקטור המתנה עד שמגיע הטוקן הראשון מה-LLM.
-        # ללא זה, המשתמש רואה בועת צ'אט ריקה למשך שנייה-שתיים בזמן שה-backend
-        # מבצע embedding + שאילתת ChromaDB + המתנה שה-GPT יתחיל לייצר —
-        # מה שמרגיש כאילו האפליקציה קפאה.
-        # ברגע שהטוקן הראשון מגיע, ה-placeholder מוחלף אוטומטית ע"י אפקט
-        # המכונת-כתיבה, כך שהמשתמש מקבל את הטקסט תוך כדי שהוא נוצר.
-        placeholder.markdown("*⏳ מחפש בתיעוד ומנסח תשובה...*")
+        # Show a waiting indicator until the first token arrives from the LLM.
+        # Without this, the chat bubble appears empty for 1-2 seconds while the
+        # backend runs embedding + ChromaDB query + waits for GPT to start generating,
+        # which feels like the app has frozen. Once the first token arrives the
+        # placeholder is replaced by the streaming text automatically.
+        placeholder.markdown("*⏳ Searching documentation and generating answer...*")
 
         try:
             with requests.post(

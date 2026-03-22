@@ -15,7 +15,7 @@ class TestSessionMemory:
     def test_max_messages_respected(self):
         from src.agent.memory import SessionMemory
         m = SessionMemory()
-        # מוסיף 4 זוגות = 8 הודעות, אבל MAX = 6
+        # Adds 4 pairs = 8 messages, but MAX = 6
         for i in range(4):
             m.add("s1", f"q{i}", f"a{i}")
         history = m.get("s1")

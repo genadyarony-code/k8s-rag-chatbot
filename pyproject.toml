@@ -1,0 +1,31 @@
+[project]
+name = "k8s-rag-chatbot"
+version = "1.0.0"
+description = "Production-grade RAG system for Kubernetes documentation"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13"
+authors = [{ name = "Yaron Genad", email = "genad.yaron.y@gmail.com" }]
+keywords = ["rag", "kubernetes", "langgraph", "chromadb", "fastapi"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = [
+    "E501",   # line too long — handled by formatter
+    "F401",   # unused imports in __init__.py re-exports
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F811"]  # redefined-while-unused (common in pytest fixtures)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--ignore=tests/eval -v"
+asyncio_mode = "auto"

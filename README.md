@@ -8,6 +8,7 @@
 **Demonstrates:** Production ML architecture, RAG systems, API design, operational thinking
 
 ---
+[![CI](https://github.com/genadyarony-code/k8s-rag-chatbot/actions/workflows/ci.yml/badge.svg)](https://github.com/genadyarony-code/k8s-rag-chatbot/actions/workflows/ci.yml)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![LangGraph](https://img.shields.io/badge/LangGraph-Production-green.svg)](https://github.com/langchain-ai/langgraph)
@@ -26,7 +27,9 @@
 → Remembers: Last 3 conversation turns for context
 ```
 
-**Demo:** *(Add screenshot or GIF here after running)*
+![K8s RAG Chatbot demo](docs/demo.gif)
+
+> Run `docker compose up --build` after ingestion to see the live UI at http://localhost:8501
 
 ---
 
@@ -323,10 +326,10 @@ k8s-rag-chatbot/
 | Feature | Why Not Included | Production Path |
 |---------|------------------|-----------------|
 | **Re-ranking** | Adds latency, overkill for 3-doc corpus | Add `flashrank` after top-5 retrieval |
-| **Redis session store** | Demo scope, single process | Replace `SessionMemory` with `redis.Redis` |
+| **Redis session store** | Demo scope; API runs `--workers 1` because session memory is in-process | Replace `SessionMemory` with `redis.Redis` to scale horizontally |
 | **Semantic chunking** | LLM-based = cost + slowness | `semantic-chunker` if corpus grows >10 docs |
 | **Authentication** | Out of scope for exercise | FastAPI OAuth2 middleware |
-| **CI/CD** | Out of scope | GitHub Actions: lint + test + docker build |
+| **CI/CD** | ✅ Added — GitHub Actions runs lint + tests on every push | Extend with docker build + push |
 | **Monitoring** | Simple logging sufficient | Prometheus + Grafana for production |
 
 **Engineering principle:** Build what you need, document what you'd add next.

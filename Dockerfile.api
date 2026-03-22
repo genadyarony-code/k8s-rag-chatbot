@@ -8,4 +8,6 @@ COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY data/processed/ ./data/processed/
 
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Single worker required: session memory lives in-process.
+# To scale horizontally, replace SessionMemory with a Redis backend first.
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -11,20 +11,20 @@ This gives tighter control over the token loop; routing it through the graph
 wrapper would complicate the SSE generator for no real benefit.
 """
 
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
-from contextlib import asynccontextmanager
-from pathlib import Path
+import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
+from pathlib import Path
 
-from openai import OpenAI
 import chromadb
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from openai import AsyncOpenAI
 
-from src.api.schemas import ChatRequest, ChatResponse, HealthResponse
 from src.agent.graph import graph
 from src.agent.memory import session_memory
-from src.config.feature_flags import FEATURE_FLAGS
+from src.api.schemas import ChatRequest, ChatResponse, HealthResponse
 from src.config.settings import settings
 
 
@@ -39,7 +39,7 @@ def check_index_health():
     if not os.path.exists(manifest):
         raise RuntimeError(
             "\n❌ Index manifest not found!"
-            "\n   Run: python scripts/ingest.py"
+            "\n Run: python scripts/ingest.py"
         )
 
     with open(manifest) as f:
@@ -48,8 +48,8 @@ def check_index_health():
     if not meta.get("chroma_ok") or not meta.get("bm25_ok"):
         raise RuntimeError(
             f"\n❌ Index is in an inconsistent state!"
-            f"\n   chroma_ok={meta.get('chroma_ok')} | bm25_ok={meta.get('bm25_ok')}"
-            f"\n   Run: python scripts/ingest.py --force"
+            f"\n chroma_ok={meta.get('chroma_ok')} | bm25_ok={meta.get('bm25_ok')}"
+            f"\n Run: python scripts/ingest.py --force"
         )
 
     print(
@@ -62,7 +62,7 @@ def check_index_health():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    check_index_health()   # crashes with RuntimeError if index is not ready
+    check_index_health()  # crashes with RuntimeError if index is not ready
     yield
     # shutdown cleanup (e.g. close DB connections) goes here if needed
 
@@ -74,24 +74,26 @@ app = FastAPI(title="K8s RAG Chatbot", version="1.0.0", lifespan=lifespan)
 async def chat(request: ChatRequest):
     """
     Main chat endpoint. Returns either a streaming SSE response or a
-    full JSON response depending on the FF_USE_STREAMING feature flag.
+    full JSON response depending on the ff_use_streaming feature flag.
 
     Streaming (SSE) response format:
-        data: {"token": "...", "done": false}   ← one per token
+        data: {"token": "...", "done": false}  ← one per token
         data: {"sources": [...], "done": true}  ← final signal
 
     Batch response format: ChatResponse JSON.
     """
-    if FEATURE_FLAGS["use_streaming"]:
+    if settings.ff_use_streaming:
         return StreamingResponse(
             _stream_response(request),
             media_type="text/event-stream"
         )
     else:
-        # Batch mode — full round-trip through LangGraph
-        result = graph.invoke(
+        # Batch mode — wrap the sync LangGraph call in a thread so it doesn't
+        # block the event loop while waiting for the OpenAI response.
+        result = await asyncio.to_thread(
+            graph.invoke,
             {"question": request.question, "session_id": request.session_id},
-            config={"configurable": {"thread_id": request.session_id}}
+            {"configurable": {"thread_id": request.session_id}},
         )
         return ChatResponse(
             answer=result["answer"],
@@ -102,29 +104,31 @@ async def chat(request: ChatRequest):
 
 async def _stream_response(request: ChatRequest):
     """
-    Async generator for the streaming chat path. Runs retrieval, then streams
-    GPT tokens one by one via SSE. Sends a final event with sources and done=True
-    when the stream ends, then saves the full exchange to session memory.
+    Async generator for the streaming chat path. Runs retrieval synchronously
+    (CPU-bound + fast local ops), then streams GPT tokens via SSE using
+    AsyncOpenAI so each token yield releases the event loop.
+    Sends a final event with sources and done=True when the stream ends.
     """
     from src.agent.nodes import retrieve_node
     from src.agent.prompts import build_prompt
 
-    # Step 1: Retrieval (includes query routing + session history loading)
-    state = retrieve_node({
-        "question": request.question,
-        "session_id": request.session_id
-    })
+    # Step 1: Retrieval (includes query routing + session history loading).
+    # Wrapped in to_thread because ChromaDB and the embeddings call are sync.
+    state = await asyncio.to_thread(
+        retrieve_node,
+        {"question": request.question, "session_id": request.session_id}
+    )
 
     # Step 2: Generation
-    if not FEATURE_FLAGS["use_openai"]:
+    if not settings.ff_use_openai:
         # Degraded mode: return raw retrieved chunks without calling the LLM
         raw = "\n\n".join([f"[{c['section_title']}]\n{c['content']}" for c in state["context"]])
         yield f"data: {json.dumps({'token': raw, 'done': False})}\n\n"
     else:
         messages = build_prompt(state["question"], state["context"], state["history"])
-        client = OpenAI(api_key=settings.openai_api_key)
+        async_client = AsyncOpenAI(api_key=settings.openai_api_key)
 
-        stream = client.chat.completions.create(
+        stream = await async_client.chat.completions.create(
             model=settings.llm_model,
             messages=messages,
             temperature=0.1,
@@ -132,14 +136,14 @@ async def _stream_response(request: ChatRequest):
         )
 
         full_answer = ""
-        for chunk in stream:
+        async for chunk in stream:
             token = chunk.choices[0].delta.content or ""
             if token:
                 full_answer += token
                 yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
 
         # Persist the complete answer to memory after the stream finishes
-        if FEATURE_FLAGS["use_session_memory"]:
+        if settings.ff_use_session_memory:
             session_memory.add(request.session_id, request.question, full_answer)
 
     # Step 3: Send sources as the completion signal
@@ -164,11 +168,18 @@ async def health():
 
     bm25_ok = Path("./bm25_index/bm25.pkl").exists()
 
+    feature_flags = {
+        "use_chroma": settings.ff_use_chroma,
+        "use_openai": settings.ff_use_openai,
+        "use_session_memory": settings.ff_use_session_memory,
+        "use_streaming": settings.ff_use_streaming,
+    }
+
     return HealthResponse(
         status="ok" if (chroma_ok or bm25_ok) else "degraded",
         chroma_ok=chroma_ok,
         bm25_ok=bm25_ok,
-        feature_flags=FEATURE_FLAGS
+        feature_flags=feature_flags
     )
 
 
