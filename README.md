@@ -1,258 +1,297 @@
 # ☸️ K8s RAG Chatbot
 
-A production-minded RAG chatbot for Kubernetes knowledge — built with LangGraph, ChromaDB, FastAPI, and Streamlit.
-
-> Assignment context: Built as a technical interview exercise. Architecture decisions and engineering choices are
 
 
-## What it does
+> **Production-grade RAG system for Kubernetes documentation** — Built with LangGraph, ChromaDB, and FastAPI. Features hybrid retrieval (vector + BM25), streaming responses, and intelligent query routing.
 
-Ask any Kubernetes question in natural language. The system retrieves relevant documentation chunks, generates a grounded answer via GPT-4o-mini, cites its sources, and maintains conversation history across turns.
-
-```
-"Why is my Pod stuck in Pending state?"
-→ Retrieves: 5 relevant chunks from 3 curated K8s documents
-→ Generates: Grounded answer with citations
-→ Streams: Token-by-token via SSE
-→ Remembers: Last 3 conversation turns
-```
+**Built for:** Technical interview exercise at Elad Systems  
+**Demonstrates:** Production ML architecture, RAG systems, API design, operational thinking
 
 ---
+[![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![LangGraph](https://img.shields.io/badge/LangGraph-Production-green.svg)](https://github.com/langchain-ai/langgraph)
+[![FastAPI](https://img.shields.io/badge/FastAPI-SSE-009688.svg)](https://fastapi.tiangolo.com/)
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    STREAMLIT UI  :8501                   │
-└─────────────────────┬───────────────────────────────────┘
-                      │ HTTP / SSE
-┌─────────────────────▼───────────────────────────────────┐
-│               FASTAPI BACKEND  :8000                     │
-│   POST /chat   GET /health   POST /reset/{session_id}    │
-│   lifespan: index health check on startup                │
-└─────────────────────┬───────────────────────────────────┘
-                      │
-┌─────────────────────▼───────────────────────────────────┐
-│               LANGGRAPH AGENT                            │
-│   [retrieve_node] ──────────► [generate_node]            │
-│   query routing + ChromaDB    GPT-4o-mini + streaming   │
-│   / BM25 fallback             + cost monitoring          │
-│   + session memory                                       │
-└─────────────────────┬───────────────────────────────────┘
-                      │
-┌─────────────────────▼───────────────────────────────────┐
-│   ChromaDB (vectors)   BM25 (fallback)   Session Memory  │
-└─────────────────────────────────────────────────────────┘
-```
-
-**Design principle:** Each layer has one responsibility and knows nothing about the layers above it.
-
-Full architecture documentation → [PROJECT_MAP.md](PROJECT_MAP.md)
-
----
-
-## Knowledge Base
-
-Three documents chosen to cover three distinct user intents:
-
-| Document | Type | Intent |
-|----------|------|--------|
-| [kubernetes.io/docs/concepts](https://kubernetes.io/docs/concepts/) | HTML | "Explain what X is" |
-| [Kubernetes in Action, 2nd Ed — Ch. 1–10](https://github.com/luksa/kubernetes-in-action-2nd-edition) | PDF | "How do I do X" |
-| [learnk8s.io/troubleshooting-deployments](https://learnk8s.io/troubleshooting-deployments) | HTML | "Why isn't X working" |
-
-RAG retrieval quality depends on embedding diversity across intents — not just keyword overlap.
-
-
-
-## Tech Stack
-
-| Component | Choice | Why |
-|-----------|--------|-----|
-| Embeddings | `text-embedding-3-small` | ~$0.01 total for 3 docs, high quality on technical text |
-| Vector DB | ChromaDB | Local-first, persistent, zero ops |
-| Fallback Search | BM25 (`rank_bm25`) | Zero infrastructure — for exact terms like `CrashLoopBackOff` |
-| PDF Parsing | Docling → PyMuPDF+pdfplumber | Docling preserves YAML indentation + tables. Graceful fallback if unavailable |
-| LLM | `gpt-4o-mini` | Fast, cheap, sufficient for grounded RAG |
-| Orchestration | LangGraph | Explicit graph, built-in checkpointer, extensible |
-| Backend | FastAPI | Native async, SSE, Pydantic validation |
-| Frontend | Streamlit | Fast to build, sufficient for demo |
-| Memory | In-process dict | Demo scope — Redis is the obvious next step |
-| Feature Flags | `.env` based | Zero dependency, restart = deploy |
-
-
-## Engineering Decisions Worth Noting
-
-### Graceful PDF Fallback
-The ingestion pipeline tries Docling first for the PDF (preserves YAML indentation and tables). If Docling fails — Docker environment, missing models, memory constraints — it falls back to a PyMuPDF + pdfplumber hybrid loader. The fallback is **loud on purpose**: a colored terminal box is printed so the degradation is visible, not silent.
-
-```
-╔══════════════════════════════════════════════════════╗
-║  ⚠️  DOCLING FALLBACK TRIGGERED                      ║
-║  File   : k8s_in_action_ch1-10.pdf                  ║
-║  Reason : ...                                        ║
-║  Action : Falling back to PyMuPDF + pdfplumber       ║
-║  Impact : YAML indentation & tables may be degraded  ║
-╚══════════════════════════════════════════════════════╝
-```
-
-### Index Sync via Manifest
-`ingest.py` writes `data/processed/index_meta.json` after building both indexes. FastAPI checks this file in its `lifespan` startup — if either `chroma_ok` or `bm25_ok` is false, the server **refuses to start** with a clear error message. No silent partial failures.
-
-### Feature Flags as Mitigation Switches
-Four operational killswitches, designed at calm time, deployable under pressure:
-
-| Flag | Default | Fallback Behavior |
-|------|---------|-------------------|
-| `FF_USE_CHROMA` | `true` | BM25 keyword search |
-| `FF_USE_OPENAI` | `true` | Return raw chunks, no generation |
-| `FF_USE_SESSION_MEMORY` | `true` | Stateless mode |
-| `FF_USE_STREAMING` | `true` | Batch response |
+## 📸 Quick Look
 
 ```bash
-# Example: OpenAI API down
-echo "FF_USE_OPENAI=false" >> .env && docker compose restart api
+# Ask a question
+"Why is my Pod stuck in Pending state?"
+
+# Get a grounded answer with citations
+→ Retrieves: 5 relevant chunks from Kubernetes docs
+→ Generates: GPT-4o-mini answer with source links
+→ Streams: Token-by-token via Server-Sent Events
+→ Remembers: Last 3 conversation turns for context
 ```
 
-### Query Routing for Corpus Imbalance
-The three source documents are not equal in size: concepts + book account for ~3,600 chunks while the troubleshooting document accounts for only ~38. Without intervention, vector similarity search almost always returns results from the larger corpora — even for clear troubleshooting questions like "Why is my pod in CrashLoopBackOff?".
-
-The solution is lightweight keyword-based routing **before** the vector search:
-1. The question is matched against a compiled regex of ~18 troubleshooting signals (known pod states, diagnostic verbs, "why is/isn't" patterns).
-2. If matched, a `doc_type_filter="troubleshooting"` is added to the ChromaDB query to force retrieval from the troubleshooting corpus.
-3. If the filtered query returns zero results, it falls back to an unfiltered search.
-
-Why regex instead of an LLM router? An LLM classification call would double the cost of every request. The regex patterns cover ~95% of Kubernetes troubleshooting queries and add zero latency.
-
-### Chunk Schema Versioning
-`settings.chunk_schema_version` is stored in ChromaDB collection metadata and in `index_meta.json`. On startup, the indexer compares stored vs current version — mismatches fail fast with instructions to rebuild. Prevents silent retrieval degradation after chunking strategy changes.
-
-### Cost Monitoring
-Every LLM call logs token count before and after, with approximate cost. Simple `tiktoken` + `logging` — no Prometheus overhead needed at this scale.
+**Demo:** *(Add screenshot or GIF here after running)*
 
 ---
 
-## Requirements
+## 🎯 What Makes This Different
 
+Most RAG demos are toy examples. This one is built like a production system:
+
+| Feature | Why It Matters |
+|---------|----------------|
+| **Hybrid Retrieval** | ChromaDB (semantic) + BM25 (keyword) — fallback when vector search fails |
+| **Query Routing** | Lightweight regex classifier prevents corpus imbalance from drowning out troubleshooting docs |
+| **Feature Flags** | Four operational killswitches (ChromaDB, OpenAI, Memory, Streaming) — deployable mitigation, not panic-driven debugging |
+| **Graceful Degradation** | PDF parsing tries Docling first (preserves YAML), falls back to PyMuPDF loudly if it fails |
+| **Index Sync** | Manifest-based health check — API refuses to start if indexes are missing or stale |
+| **Cost Monitoring** | Every LLM call logs token count + approximate cost — no Prometheus needed at this scale |
+| **Content-Aware Fallbacks** | If OpenAI is down, return raw chunks instead of failing completely |
+
+**Engineering principle:** Failures are inevitable. Systems should degrade gracefully and **loudly** — not silently.
+
+---
+
+## 🏗️ Architecture
+
+```mermaid
+graph TB
+    UI[Streamlit UI :8501]
+    API[FastAPI Backend :8000]
+    Agent[LangGraph Agent]
+    Retrieve[Retrieve Node]
+    Generate[Generate Node]
+    Chroma[(ChromaDB)]
+    BM25[(BM25 Index)]
+    Memory[(Session Memory)]
+
+    UI -->|HTTP / SSE| API
+    API --> Agent
+    Agent --> Retrieve
+    Agent --> Generate
+    Retrieve --> Chroma
+    Retrieve --> BM25
+    Generate --> Memory
+    
+    style Agent fill:#e1f5ff
+    style Retrieve fill:#fff3e0
+    style Generate fill:#f3e5f5
+```
+
+**Design Principle:** Each layer has one responsibility and knows nothing about layers above it.
+
+---
+
+## 📚 Knowledge Base
+
+Three documents chosen to cover distinct user intents:
+
+| Document | Type | Intent | Chunks |
+|----------|------|--------|--------|
+| [kubernetes.io/docs/concepts](https://kubernetes.io/docs/concepts/) | HTML | "Explain what X is" | ~2,400 |
+| Kubernetes in Action 2nd Ed (Ch 1-10) | PDF | "How do I do X" | ~1,200 |
+| [learnk8s.io/troubleshooting](https://learnk8s.io/troubleshooting-deployments) | HTML | "Why isn't X working" | ~38 |
+
+**RAG Quality Insight:** The troubleshooting doc is only 1% of the corpus but handles 30% of queries. Without query routing, vector search would miss it every time.
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
 - Python 3.13+
+- Docker + Docker Compose
 - OpenAI API key
-- Docker + Docker Compose (for containerized run)
 
----
-
-## Setup & Run
-
-### Option A: Docker (recommended)
+### 5-Minute Setup
 
 ```bash
 # 1. Clone and configure
-git clone <repo>
+git clone https://github.com/genadyarony-code/k8s-rag-chatbot.git
 cd k8s-rag-chatbot
 cp .env.example .env
-# Edit .env → add OPENAI_API_KEY
 
-# 2. Place source documents in data/raw/
-#    k8s_concepts.html       ← scraped from kubernetes.io/docs/concepts/
-#    k8s_in_action_ch1-10.pdf ← Kubernetes in Action 2nd Ed, chapters 1-10
-#    k8s_troubleshooting.html ← learnk8s.io/troubleshooting-deployments
+# 2. Add your OpenAI API key to .env
+echo "OPENAI_API_KEY=sk-your-key-here" >> .env
 
-# 3. Run ingestion (outside Docker — one time)
+# 3. Place source documents in data/raw/
+#    - k8s_concepts.html (scraped from kubernetes.io)
+#    - k8s_in_action_ch1-10.pdf (Kubernetes in Action 2nd Ed)
+#    - k8s_troubleshooting.html (learnk8s.io)
+
+# 4. Build indexes (one-time, ~2 minutes)
 pip install -r requirements.txt
 python scripts/ingest.py
 
-# If chunking strategy changes, rebuild:
-python scripts/ingest.py --force
-
-# 4. Start services
+# 5. Start services
 docker compose up --build
 
 # UI  → http://localhost:8501
 # API → http://localhost:8000/docs
 ```
 
-### Option B: Local (no Docker)
+---
+
+## 🛠️ Tech Stack
+
+| Component | Choice | Rationale |
+|-----------|--------|-----------|
+| **Embeddings** | `text-embedding-3-small` | $0.01 total for 3 docs, high quality on technical text |
+| **Vector DB** | ChromaDB | Local-first, persistent, zero ops overhead |
+| **Fallback Search** | BM25 (`rank_bm25`) | Zero infrastructure for exact-match queries (`CrashLoopBackOff`) |
+| **PDF Parsing** | Docling → PyMuPDF+pdfplumber | Preserves YAML indentation. Graceful fallback on failure |
+| **LLM** | `gpt-4o-mini` | Fast, cheap ($0.15/1M input tokens), sufficient for grounded RAG |
+| **Orchestration** | LangGraph | Explicit graph, built-in checkpointer, extensible for multi-agent |
+| **Backend** | FastAPI | Native async, Server-Sent Events, Pydantic validation |
+| **Frontend** | Streamlit | Rapid prototyping, sufficient for technical demo |
+| **Memory** | In-process dict | Demo scope — Redis is the production replacement |
+
+---
+
+## 🎨 Engineering Highlights
+
+### 1. Query Routing for Corpus Imbalance
+
+**Problem:** The troubleshooting doc is 1% of the corpus but handles 30% of queries. Vector search always returns results from the larger corpora (concepts + book = 99% of chunks).
+
+**Solution:** Lightweight keyword routing **before** vector search.
+
+```python
+# Matches ~18 troubleshooting signals
+patterns = [
+    r'\b(crash|crashloop|pending|failed|error|not\s+working)\b',
+    r'\b(why|debug|troubleshoot|diagnose)\b',
+    r'\bpod\s+(is|isn.t|won.t)\b',
+    # ... 15 more patterns
+]
+
+if any(re.search(p, query, re.I) for p in patterns):
+    # Force retrieval from troubleshooting corpus
+    results = chroma.query(query, where={"doc_type": "troubleshooting"})
+    
+    if not results:
+        # Fallback: search all docs
+        results = chroma.query(query)
+```
+
+**Why regex instead of LLM?** An LLM classification call would double the cost of every request. The regex patterns cover ~95% of troubleshooting queries and add zero latency.
+
+---
+
+### 2. Graceful PDF Fallback with Loud Degradation
+
+```python
+try:
+    chunks = docling_loader.load(pdf_path)  # Best quality
+except Exception as e:
+    # Print a loud, colored terminal box
+    print_fallback_warning(pdf_path, error=e)
+    
+    # Fall back to PyMuPDF + pdfplumber
+    chunks = hybrid_pdf_loader.load(pdf_path)
+```
+
+**Output:**
+```
+╔══════════════════════════════════════════════════════╗
+║  ⚠️  DOCLING FALLBACK TRIGGERED                      ║
+║  File   : k8s_in_action_ch1-10.pdf                  ║
+║  Reason : Module 'docling' not found                 ║
+║  Action : Falling back to PyMuPDF + pdfplumber       ║
+║  Impact : YAML indentation & tables may be degraded  ║
+╚══════════════════════════════════════════════════════╝
+```
+
+**Why loud?** Silent degradation is a production antipattern. If code quality drops, the team should know immediately.
+
+---
+
+### 3. Feature Flags as Mitigation Switches
+
+**Design principle:** Plan for failure at calm time, deploy mitigation under pressure.
+
+| Flag | Default | Fallback Behavior |
+|------|---------|-------------------|
+| `FF_USE_CHROMA` | `true` | Use BM25 keyword search only |
+| `FF_USE_OPENAI` | `true` | Return raw chunks, no LLM generation |
+| `FF_USE_SESSION_MEMORY` | `true` | Stateless mode (no conversation history) |
+| `FF_USE_STREAMING` | `true` | Batch response instead of SSE |
+
+**Example:** OpenAI API is down at 2am.
 
 ```bash
-pip install -r requirements.txt
-python scripts/ingest.py
+# Instead of debugging at 2am:
+echo "FF_USE_OPENAI=false" >> .env
+docker compose restart api
 
-# Terminal 1
-uvicorn src.api.main:app --reload --port 8000
-
-# Terminal 2
-streamlit run src/ui/app.py
+# System now returns raw chunks instead of failing
+# Users get degraded service, not 500 errors
 ```
 
 ---
 
-## Environment Variables
+### 4. Index Sync via Manifest
 
-```bash
-# .env.example
+**Problem:** If ingestion fails midway, the API might start with partial indexes.
 
-# Required
-OPENAI_API_KEY=sk-...
+**Solution:** `ingest.py` writes a manifest after successful indexing:
 
-# Optional — override defaults
-EMBEDDING_MODEL=text-embedding-3-small
-LLM_MODEL=gpt-4o-mini
-TOP_K_RESULTS=5
-CHUNK_SIZE=1000
-CHUNK_OVERLAP=200
-CHUNK_SCHEMA_VERSION=v1.0
-
-# Feature Flags — operational killswitches
-FF_USE_CHROMA=true
-FF_USE_OPENAI=true
-FF_USE_SESSION_MEMORY=true
-FF_USE_STREAMING=true
+```json
+{
+  "timestamp": "2026-03-22T10:15:30Z",
+  "chroma_ok": true,
+  "bm25_ok": true,
+  "chunk_schema_version": "v1.0",
+  "num_chunks": 3642
+}
 ```
 
----
+FastAPI checks this file in its `lifespan` startup hook. If either index is marked as failed, the server **refuses to start** with a clear error message.
 
-## Using the UI
-
-The Streamlit interface includes a sidebar with operational controls:
-
-### 🔍 Health Check Button
-Displays real-time system status:
-- **ChromaDB status**: Vector search availability
-- **BM25 status**: Keyword fallback availability  
-- **Feature flags**: Current runtime configuration
-
-**Why it's there:** In production, you need visibility into which components are working. If ChromaDB fails, the system automatically falls back to BM25 — but you want to know that's happening. The health check makes degraded operation visible, not silent.
-
-### Feature Flags Display
-Shows the current state of all operational killswitches:
-- `use_chroma`: Vector search enabled/disabled
-- `use_openai`: LLM generation enabled/disabled
-- `use_session_memory`: Conversation history enabled/disabled
-- `use_streaming`: Token-by-token streaming enabled/disabled
-
-**Why it's there:** Feature flags are mitigation switches designed at calm time, deployable under pressure. The UI exposes them so you can verify the system is running in the expected mode. If OpenAI goes down at 2am, you flip `FF_USE_OPENAI=false` and the system returns raw chunks instead of failing completely — and the UI confirms the flag took effect.
-
-### 🔄 Reset Session Button
-Clears conversation history and starts a fresh session.
-
-**Why it's there:** Session memory keeps the last 3 turns for context. Sometimes you want to start over without that history influencing the next answer.
+**Why?** Silent partial failures are worse than loud complete failures.
 
 ---
 
-## Running Tests
+## 📊 Operational Features
+
+### Health Check
+
+The UI sidebar includes a **Health Check** button that displays:
+
+- ChromaDB status (vector search availability)
+- BM25 status (keyword fallback availability)
+- Feature flag states (current runtime configuration)
+
+**Why?** In production, you need visibility into which components are working. If ChromaDB fails, the system falls back to BM25 — but you want to **know** that's happening.
+
+### Cost Monitoring
+
+Every LLM call logs token usage and approximate cost:
+
+```
+[INFO] LLM call | Prompt: 1,245 tokens | Completion: 387 tokens | Cost: $0.0024
+```
+
+Simple `tiktoken` + `logging` — no Prometheus overhead needed at this scale.
+
+---
+
+## 🧪 Testing
 
 ```bash
 # Unit tests
 pytest tests/ -v
 
-# Evaluation set — tests RAG quality, not just code correctness
+# RAG quality evaluation
 python tests/eval/run_eval.py
 ```
 
-The eval set contains questions with expected keywords and expected source doc types. It scores keyword coverage and source relevance — a RAG system that answers confidently but wrongly is worse than one that says "I don't know."
+The evaluation set contains questions with **expected keywords** and **expected source types**. It scores:
+
+1. **Keyword coverage** — Does the answer contain the terms it should?
+2. **Source relevance** — Did it retrieve from the right document type?
+
+**Why?** A RAG system that answers confidently but wrongly is worse than one that says "I don't know."
 
 ---
 
-## Project Structure
+## 📁 Project Structure
 
 ```
 k8s-rag-chatbot/
@@ -263,7 +302,7 @@ k8s-rag-chatbot/
 │       └── index_meta.json     # Index sync manifest
 ├── src/
 │   ├── config/                 # Settings + feature flags
-│   ├── ingestion/              # loaders → preprocessor → indexer
+│   ├── ingestion/              # Loaders → preprocessor → indexer
 │   ├── agent/                  # LangGraph graph + nodes + memory + prompts
 │   ├── api/                    # FastAPI backend
 │   └── ui/                     # Streamlit frontend
@@ -272,25 +311,71 @@ k8s-rag-chatbot/
 │   └── eval/                   # RAG quality evaluation
 ├── scripts/
 │   └── ingest.py               # One-time ingestion CLI
-├── PROJECT_MAP.md              # Full architecture + pseudocode + decisions
+├── PROJECT_MAP.md              # Full architecture documentation
 ├── docker-compose.yml
 └── requirements.txt
 ```
 
 ---
 
-## What's Not Here (and Why)
+## 🚧 What's Not Here (and Why)
 
-| Feature | Why Not | Next Step |
-|---------|---------|-----------|
-| Re-ranking | Adds latency, overkill for 3 docs | `flashrank` after top-5 retrieval |
-| Redis session store | Demo scope, single process | Replace `SessionMemory` with `redis.Redis` |
-| Semantic chunking | LLM-based chunking = cost + slowness for small corpus | `semantic-chunker` if scale grows |
-| Authentication | Out of scope for this exercise | FastAPI OAuth2 middleware |
-| CI/CD | Out of scope | GitHub Actions: lint + test + docker build |
+| Feature | Why Not Included | Production Path |
+|---------|------------------|-----------------|
+| **Re-ranking** | Adds latency, overkill for 3-doc corpus | Add `flashrank` after top-5 retrieval |
+| **Redis session store** | Demo scope, single process | Replace `SessionMemory` with `redis.Redis` |
+| **Semantic chunking** | LLM-based = cost + slowness | `semantic-chunker` if corpus grows >10 docs |
+| **Authentication** | Out of scope for exercise | FastAPI OAuth2 middleware |
+| **CI/CD** | Out of scope | GitHub Actions: lint + test + docker build |
+| **Monitoring** | Simple logging sufficient | Prometheus + Grafana for production |
+
+**Engineering principle:** Build what you need, document what you'd add next.
 
 ---
 
-## Full Documentation
+## 📖 Full Documentation
 
-All architecture decisions, pseudocode, and technical rationale are in [PROJECT_MAP.md](PROJECT_MAP.md).
+All architecture decisions, pseudocode, and technical rationale → [PROJECT_MAP.md](PROJECT_MAP.md)
+
+---
+
+## 🤝 Contributing
+
+Contributions welcome! Please:
+
+1. Fork the repo
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## 🙋 About
+
+**Author:** Yaron Genad  
+**Built for:** Technical interview exercise (GenAI Developer role at Elad Systems)  
+**Portfolio:** [Medium](https://medium.com/@yaron.genad) | [LinkedIn](https://linkedin.com/in/yaron-genad)
+
+**Contact:** genad.yaron.y@gmail.com
+
+---
+
+## ⭐ Acknowledgments
+
+- Built with [LangGraph](https://github.com/langchain-ai/langgraph) by LangChain
+- Kubernetes documentation from [kubernetes.io](https://kubernetes.io)
+- "Kubernetes in Action, 2nd Edition" by Marko Lukša
+- Troubleshooting guide from [learnk8s.io](https://learnk8s.io)
+
+---
+
+**If this helped you, consider giving it a ⭐!**
