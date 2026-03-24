@@ -1,166 +1,95 @@
 """
-run_eval.py
-===========
-בודק איכות RAG לפי 3 מדדים:
-1. Keyword coverage: האם התשובה מכילה מילות מפתח צפויות?
-2. Source relevance: האם ה-chunks שנשלפו מהdoc_type הנכון?
-3. Pass threshold: keyword_score >= 0.5 AND source_match
+CLI script to run the golden evaluation suite.
 
-הרצה:
+Usage (from project root):
     python tests/eval/run_eval.py
-    python tests/eval/run_eval.py --verbose
+
+Options (set via env vars):
+    EVAL_DATASET  — path to eval dataset (default: tests/eval/eval_dataset.json)
+    SAVE_BASELINE — if "true", overwrites tests/eval/baseline.json with this run
+
+Workflow:
+    # First run — establish a baseline
+    python tests/eval/run_eval.py SAVE_BASELINE=true
+
+    # After code changes — compare against baseline
+    python tests/eval/run_eval.py
 """
 
-import json
+import asyncio
+import os
 import sys
-import argparse
-import requests
 from pathlib import Path
 
-API_URL = "http://localhost:8000"
-GREEN = "\033[92m"
-RED   = "\033[91m"
-YELLOW = "\033[93m"
-RESET = "\033[0m"
+# Ensure project root is on the path regardless of where the script is run from
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from src.evaluation.eval_runner import run_full_eval, save_eval_report
+from src.evaluation.regression_detector import detect_regressions, load_baseline, save_baseline
 
 
-def _call_api(question: str, session_id: str) -> dict:
-    """
-    קורא ל-/chat endpoint.
-    תומך בשני מצבים:
-    - Streaming (SSE): מרכיב את התשובה מה-tokens
-    - Batch (JSON): מחזיר ישירות
-    """
-    response = requests.post(
-        f"{API_URL}/chat",
-        json={"question": question, "session_id": session_id},
-        timeout=60,
-        stream=True  # תמיד stream=True כדי לתמוך בשני המצבים
-    )
-    response.raise_for_status()
+async def main() -> None:
+    dataset = os.environ.get("EVAL_DATASET", "tests/eval/eval_dataset.json")
+    should_save_baseline = os.environ.get("SAVE_BASELINE", "").lower() == "true"
 
-    content_type = response.headers.get("content-type", "")
+    print(f"\nRunning evaluation on: {dataset}")
+    print("This may take a few minutes...\n")
 
-    # SSE streaming mode
-    if "text/event-stream" in content_type:
-        full_answer = ""
-        sources = []
-        for line in response.iter_lines():
-            if not line:
-                continue
-            if isinstance(line, bytes):
-                line = line.decode("utf-8")
-            if line.startswith("data: "):
-                try:
-                    data = json.loads(line[6:])
-                    if data.get("done") is False:
-                        full_answer += data.get("token", "")
-                    elif data.get("done") is True:
-                        sources = data.get("sources", [])
-                except json.JSONDecodeError:
-                    pass
-        return {"answer": full_answer, "sources": sources}
+    report = await run_full_eval(dataset_path=dataset)
 
-    # Batch JSON mode
-    else:
-        return response.json()
+    # Persist report
+    report_path = save_eval_report(report)
 
+    # Print summary
+    agg = report["aggregates"]
+    print("=" * 60)
+    print("EVALUATION SUMMARY")
+    print("=" * 60)
+    print(f"Total cases:         {report['total_cases']}")
+    print(f"Avg overall score:   {agg['avg_overall_score']:.2f} / 5")
+    print(f"Avg accuracy:        {agg['avg_accuracy_score']:.2f} / 5")
+    print(f"Keyword coverage:    {agg['avg_keyword_coverage']:.1%}")
+    print(f"Source coverage:     {agg['avg_source_coverage']:.1%}")
+    print(f"Failures (score<3):  {agg['failure_count']}")
+    print(f"\nReport saved to:     {report_path}")
 
-def run_eval(verbose: bool = False) -> list[dict]:
-    questions_path = Path(__file__).parent / "eval_questions.json"
-    with open(questions_path) as f:
-        questions = json.load(f)
+    if report["failures"]:
+        print("\n" + "=" * 60)
+        print("FAILING CASES")
+        print("=" * 60)
+        for f in report["failures"]:
+            print(f"\n  [{f['case_id']}] {f['question']}")
+            print(f"  Score: {f['evaluation']['overall']}/5")
+            issues = f['evaluation'].get("issues", [])
+            if issues:
+                print(f"  Issues: {', '.join(issues)}")
 
-    print(f"\n{GREEN}=== RAG Evaluation Set ==={RESET}")
-    print(f"Questions: {len(questions)}\n")
+    # Regression check (if baseline exists)
+    baseline_path = "tests/eval/baseline.json"
+    if Path(baseline_path).exists() and not should_save_baseline:
+        print("\n" + "=" * 60)
+        print("REGRESSION CHECK")
+        print("=" * 60)
+        baseline = load_baseline(baseline_path)
+        regressions = detect_regressions(report, baseline)
+        if regressions:
+            print(f"⚠  {len(regressions)} regression(s) detected:")
+            for r in regressions:
+                if r["type"] == "overall_score":
+                    print(f"  CRITICAL — overall score dropped {r['drop_pct']}%"
+                          f" ({r['baseline']} → {r['current']})")
+                else:
+                    print(f"  WARNING  — [{r['case_id']}] score dropped {r['drop_pct']}%"
+                          f" ({r['baseline_score']} → {r['current_score']})")
+        else:
+            print("✓ No regressions detected.")
 
-    results = []
+    if should_save_baseline:
+        save_baseline(report, baseline_path)
+        print(f"\n✓ Baseline saved to {baseline_path}")
 
-    for q in questions:
-        try:
-            response = _call_api(q["question"], f"eval-{q['id']}")
-        except Exception as e:
-            print(f"[{q['id']}] {RED}ERROR: {e}{RESET}")
-            results.append({"id": q["id"], "pass": False, "error": str(e)})
-            continue
-
-        answer = response.get("answer", "").lower()
-        sources = response.get("sources", [])
-
-        # מדד 1: keyword coverage
-        found_keywords = [kw for kw in q["expected_keywords"] if kw.lower() in answer]
-        keyword_score = len(found_keywords) / len(q["expected_keywords"])
-
-        # מדד 2: source relevance (לפי doc_type בשם הקובץ)
-        source_match = any(
-            doc_type in " ".join(sources).lower()
-            for doc_type in q["expected_doc_types"]
-        )
-
-        passed = keyword_score >= 0.5 and source_match
-
-        result = {
-            "id": q["id"],
-            "category": q["category"],
-            "question": q["question"],
-            "keyword_score": round(keyword_score, 2),
-            "keywords_found": found_keywords,
-            "source_match": source_match,
-            "sources": sources,
-            "pass": passed
-        }
-        results.append(result)
-
-        # output
-        status = f"{GREEN}✓ PASS{RESET}" if passed else f"{RED}✗ FAIL{RESET}"
-        src_icon = "✓" if source_match else "✗"
-        print(
-            f"[{q['id']}] {status} | "
-            f"category={q['category']:<15} | "
-            f"keywords={keyword_score:.0%} | "
-            f"source={src_icon}"
-        )
-
-        if verbose and not passed:
-            print(f"  Question: {q['question']}")
-            print(f"  Expected keywords: {q['expected_keywords']}")
-            print(f"  Found: {found_keywords}")
-            print(f"  Sources: {sources}")
-            print()
-
-    # Summary
-    passed_count = sum(1 for r in results if r.get("pass"))
-    total = len(results)
-    pct = passed_count / total * 100 if total > 0 else 0
-
-    print(f"\n{'='*50}")
-    print(f"Result: {passed_count}/{total} passed ({pct:.0f}%)")
-
-    # by category
-    categories = {}
-    for r in results:
-        cat = r.get("category", "unknown")
-        categories.setdefault(cat, {"pass": 0, "total": 0})
-        categories[cat]["total"] += 1
-        if r.get("pass"):
-            categories[cat]["pass"] += 1
-
-    print("\nBy category:")
-    for cat, stats in categories.items():
-        cat_pct = stats["pass"] / stats["total"] * 100
-        color = GREEN if cat_pct >= 60 else YELLOW if cat_pct >= 40 else RED
-        print(f"  {cat:<20} {stats['pass']}/{stats['total']} ({color}{cat_pct:.0f}%{RESET})")
-
-    return results
+    print()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args()
-
-    results = run_eval(verbose=args.verbose)
-
-    # exit code: 0 אם >60% עברו, אחרת 1
-    passed = sum(1 for r in results if r.get("pass"))
-    sys.exit(0 if passed / len(results) >= 0.6 else 1)
+    asyncio.run(main())

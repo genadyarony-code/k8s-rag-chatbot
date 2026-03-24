@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     # Disabled by default — sentence-transformers adds ~2 GB to the Docker image
     ff_use_citation_validation: bool = False
 
+    # ── Evaluation settings ───────────────────────────────────────────────────
+    # Fraction of live /chat requests to evaluate with LLM-as-judge (0.0–1.0).
+    # Evaluation runs asynchronously after the response is sent, so users never
+    # experience added latency.
+    eval_sample_rate: float = 0.1
+
     # ── Observability ─────────────────────────────────────────────────────────
     # Set OTLP_ENDPOINT to send traces to Jaeger / Grafana Tempo / any OTel
     # Collector. Leave unset to print spans to stdout (dev mode).

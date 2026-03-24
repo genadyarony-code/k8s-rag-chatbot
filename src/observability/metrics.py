@@ -126,6 +126,22 @@ query_decomposition_count = Counter(
 )
 
 
+# ── Evaluation / A/B Metrics ─────────────────────────────────────────────────
+
+eval_score = Histogram(
+    "eval_score",
+    "LLM-as-judge scores for sampled production responses",
+    ["metric"],  # accuracy | completeness | relevance | grounding | overall
+    buckets=[1, 2, 3, 4, 5],
+)
+
+ab_test_assignments = Counter(
+    "ab_test_assignments_total",
+    "A/B test variant assignments",
+    ["test_id", "variant"],
+)
+
+
 def get_metrics() -> bytes:
     """
     Generate Prometheus exposition format.

@@ -379,7 +379,12 @@ def generate_node(state: dict) -> dict:
             raw = "\n\n".join([f"[{c['section_title']}]\n{c['content']}" for c in state["context"]])
             return {**state, "answer": raw, "sources": [c["source"] for c in state["context"]]}
 
-        messages = build_prompt(state["question"], state["context"], state["history"])
+        messages = build_prompt(
+            state["question"],
+            state["context"],
+            state["history"],
+            session_id=state.get("session_id", ""),
+        )
         estimated_tokens = sum(len(_tokenizer.encode(m.get("content", ""))) for m in messages)
         span.set_attribute("estimated_input_tokens", estimated_tokens)
 

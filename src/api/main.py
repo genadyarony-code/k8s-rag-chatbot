@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 import chromadb
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from openai import AsyncOpenAI
 from prometheus_client import CONTENT_TYPE_LATEST
@@ -43,6 +43,7 @@ from src.observability.metrics import (
     get_metrics,
     index_health,
 )
+from src.evaluation.live_sampler import get_sampler
 from src.security.rate_limiter import limiter
 from src.security.validator import validate_chat_input
 
@@ -188,6 +189,14 @@ async def chat(
                 sources_count=len(result["sources"]),
             )
 
+            # Live sampling: evaluate ~10 % of responses asynchronously
+            get_sampler().schedule(
+                question=validated_question,
+                answer=result["answer"],
+                sources=result["sources"],
+                session_id=request.session_id,
+            )
+
             return ChatResponse(
                 answer=result["answer"],
                 sources=result["sources"],
@@ -240,7 +249,9 @@ async def _stream_response(
         raw = "\n\n".join([f"[{c['section_title']}]\n{c['content']}" for c in state["context"]])
         yield f"data: {json.dumps({'token': raw, 'done': False})}\n\n"
     else:
-        messages = build_prompt(state["question"], state["context"], state["history"])
+        messages = build_prompt(
+            state["question"], state["context"], state["history"], session_id=session_id
+        )
         async_client = AsyncOpenAI(api_key=settings.openai_api_key)
 
         stream = await async_client.chat.completions.create(
