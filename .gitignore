@@ -1,5 +1,6 @@
-# Secrets
+# Secrets — never commit real credentials
 .env
+.env-*.example
 
 # Vector DB — ignore content but keep the placeholder so the folder exists after clone
 chroma_db/*

@@ -20,20 +20,29 @@ HTTP session objects (OpenAI) or performs disk I/O (ChromaDB) on every call.
 """
 
 import pickle
-import logging
 import re
+import time
 
 import chromadb
 import numpy as np
 import tiktoken
 from openai import OpenAI
 
-from src.config.settings import settings
 from src.agent.memory import session_memory
 from src.agent.prompts import build_prompt
+from src.config.settings import settings
+from src.observability.logging_config import get_logger
+from src.observability.metrics import (
+    bm25_query_total,
+    chat_cost_usd_total,
+    chat_tokens_total,
+    chroma_query_total,
+    generation_latency_seconds,
+    retrieval_latency_seconds,
+)
 
 _tokenizer = tiktoken.encoding_for_model("gpt-4o-mini")
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 # ── Lazy singletons ────────────────────────────────────────────────────────────
@@ -89,13 +98,11 @@ TROUBLESHOOTING_SIGNALS = [
     r"\bcrashing\b",
     r"\bstuck\b",
     r"\bcan.t\s+(reach|connect|access)\b",
-    r"\bcannot\s+(reach|connect|access|find)\b",  # "cannot" is not caught by can.t
+    r"\bcannot\s+(reach|connect|access|find)\b",
     r"\b(keeps?\s+restarting|restarting\s+constantly)\b",
     r"\bexits?\s+immediately\b",
     # Troubleshooting question openers — scoped to "my/the/this/it/a" so that
     # conceptual "why is Kubernetes declarative?" questions are NOT routed here.
-    # Without the possessive/article guard, bare \bwhy\b fires on ~90% of
-    # conceptual questions and sends them to the tiny troubleshooting corpus.
     r"\bwhy\s+(is|are|isn.t|aren.t|won.t|can.t)\s+(my|the|this|it|a)\b",
     r"\bwhat.s\s+wrong\b",
     r"\bhow\s+to\s+(fix|debug|troubleshoot|diagnose)\b",
@@ -104,7 +111,7 @@ TROUBLESHOOTING_SIGNALS = [
 
 _TROUBLESHOOTING_RE = re.compile(
     "|".join(TROUBLESHOOTING_SIGNALS),
-    re.IGNORECASE
+    re.IGNORECASE,
 )
 
 
@@ -121,7 +128,7 @@ def _detect_doc_type(question: str) -> str | None:
     at zero extra cost and with sub-millisecond execution time.
     """
     if _TROUBLESHOOTING_RE.search(question):
-        logger.info("[Router] → troubleshooting doc_type detected")
+        log.info("query_routed", doc_type="troubleshooting")
         return "troubleshooting"
     return None
 
@@ -136,36 +143,41 @@ def retrieve_node(state: dict) -> dict:
     for troubleshooting questions, and loads session history.
     Returns the updated state with 'context' and 'history' populated.
     """
+    start_time = time.time()
     question = state["question"]
     session_id = state["session_id"]
 
     if settings.ff_use_chroma:
-        # Routing: troubleshooting questions get a doc_type filter to bypass
-        # the corpus size imbalance that would otherwise suppress those results.
         doc_type = _detect_doc_type(question)
         context = _chroma_search(question, doc_type_filter=doc_type)
+        chroma_query_total.labels(doc_type_filter=str(doc_type)).inc()
 
-        # Safety fallback: retry unfiltered if the filtered results are empty
-        # OR if every returned chunk scores below ROUTING_SCORE_THRESHOLD.
-        #
-        # The score check is the critical addition: ChromaDB always returns
-        # n_results even when the query has no real match in the filtered
-        # subset. Without this guard, a false-positive route (e.g. a
-        # conceptual "why is X…" question matched by the routing regex)
-        # would be answered with low-relevance troubleshooting chunks instead
-        # of the correct concepts/book context.
         ROUTING_SCORE_THRESHOLD = 0.3
         if not context or all(c["score"] < ROUTING_SCORE_THRESHOLD for c in context):
-            logger.warning(
-                "[Router] Filtered results empty or all scores below %.1f — "
-                "falling back to unfiltered search",
-                ROUTING_SCORE_THRESHOLD,
+            log.warning(
+                "routing_fallback_triggered",
+                session_id=session_id,
+                doc_type_filter=doc_type,
+                threshold=ROUTING_SCORE_THRESHOLD,
             )
             context = _chroma_search(question)
+            chroma_query_total.labels(doc_type_filter="fallback").inc()
     else:
         context = _bm25_search(question)
+        bm25_query_total.inc()
 
     history = session_memory.get(session_id) if settings.ff_use_session_memory else []
+
+    elapsed = time.time() - start_time
+    retrieval_latency_seconds.observe(elapsed)
+
+    log.info(
+        "retrieval_completed",
+        session_id=session_id,
+        chunks_retrieved=len(context),
+        latency_seconds=round(elapsed, 3),
+        used_chroma=settings.ff_use_chroma,
+    )
 
     return {**state, "context": context, "history": history}
 
@@ -192,12 +204,12 @@ def _chroma_search(question: str, doc_type_filter: str = None) -> list[dict]:
     query_params = {
         "query_embeddings": [query_vector],
         "n_results": settings.top_k_results,
-        "include": ["documents", "metadatas", "distances"]
+        "include": ["documents", "metadatas", "distances"],
     }
 
     if doc_type_filter:
         query_params["where"] = {"doc_type": {"$eq": doc_type_filter}}
-        logger.info(f"[Retrieval] doc_type_filter={doc_type_filter}")
+        log.info("chroma_search", doc_type_filter=doc_type_filter)
 
     results = collection.query(**query_params)
 
@@ -206,11 +218,11 @@ def _chroma_search(question: str, doc_type_filter: str = None) -> list[dict]:
         "source": meta["source"],
         "section_title": meta["section_title"],
         "doc_type": meta["doc_type"],
-        "score": 1 - dist  # cosine distance → similarity score
+        "score": 1 - dist,
     } for doc, meta, dist in zip(
         results["documents"][0],
         results["metadatas"][0],
-        results["distances"][0]
+        results["distances"][0],
     )]
 
 
@@ -233,7 +245,7 @@ def _bm25_search(question: str) -> list[dict]:
         "source": chunks[i].source,
         "section_title": chunks[i].section_title,
         "doc_type": chunks[i].doc_type,
-        "score": float(scores[i])
+        "score": float(scores[i]),
     } for i in top_indices]
 
 
@@ -248,27 +260,44 @@ def generate_node(state: dict) -> dict:
     Returns the updated state with 'answer' and 'sources' populated.
     """
     if not settings.ff_use_openai:
-        # Degraded mode: return raw retrieved chunks without LLM generation
         raw = "\n\n".join([f"[{c['section_title']}]\n{c['content']}" for c in state["context"]])
         return {**state, "answer": raw, "sources": [c["source"] for c in state["context"]]}
 
     messages = build_prompt(state["question"], state["context"], state["history"])
 
-    # Log estimated token count before the API call for cost visibility
     token_count = sum(len(_tokenizer.encode(m.get("content", ""))) for m in messages)
-    logger.info(f"Request tokens: {token_count} | session: {state['session_id'][:8]}")
+    log.info(
+        "generation_started",
+        session_id=state["session_id"],
+        input_tokens=token_count,
+    )
 
+    start_time = time.time()
     client = _get_openai_client()
     response = client.chat.completions.create(
         model=settings.llm_model,
         messages=messages,
         temperature=0.1,
-        stream=False  # token-by-token streaming is handled in api/main.py _stream_response
+        stream=False,
     )
 
     answer = response.choices[0].message.content
     total_tokens = response.usage.total_tokens
-    logger.info(f"Response tokens: {total_tokens} | ~cost: ${total_tokens * 0.00000015:.6f}")
+    cost_usd = total_tokens * 0.00000015  # gpt-4o-mini pricing
+
+    chat_tokens_total.labels(model=settings.llm_model).inc(total_tokens)
+    chat_cost_usd_total.inc(cost_usd)
+
+    elapsed = time.time() - start_time
+    generation_latency_seconds.observe(elapsed)
+
+    log.info(
+        "generation_completed",
+        session_id=state["session_id"],
+        total_tokens=total_tokens,
+        cost_usd=round(cost_usd, 8),
+        latency_seconds=round(elapsed, 3),
+    )
 
     sources = list(set(c["source"] for c in state["context"]))
 
