@@ -1,0 +1,26 @@
+# kustomization.yaml — apply the entire k8s/ directory with:
+#   kubectl apply -k k8s/
+#
+# Or each file individually:
+#   kubectl apply -f k8s/namespace.yaml
+#   kubectl apply -f k8s/configmap.yaml
+#   kubectl apply -f k8s/secret.yaml      # fill in real values first
+#   kubectl apply -f k8s/pvc.yaml
+#   kubectl apply -f k8s/deployment.yaml
+#   kubectl apply -f k8s/service.yaml
+#   kubectl apply -f k8s/ingress.yaml
+#   kubectl apply -f k8s/hpa.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: k8s-rag-chatbot
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - hpa.yaml

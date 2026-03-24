@@ -1,0 +1,30 @@
+# ── ChromaDB vector store ─────────────────────────────────────────────────────
+# ReadWriteOnce: only one pod writes at a time (ChromaDB is single-writer).
+# For multi-replica deployments, migrate to a hosted vector DB
+# (Pinecone, Qdrant, Weaviate) or wrap ChromaDB in its client/server mode.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chroma-pvc
+  namespace: k8s-rag-chatbot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard   # Adjust to your cluster's storage class
+---
+# ── BM25 keyword index ────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bm25-pvc
+  namespace: k8s-rag-chatbot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: standard

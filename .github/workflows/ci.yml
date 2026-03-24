@@ -7,36 +7,75 @@ on:
     branches: [master]
 
 jobs:
+  # ── Lint ────────────────────────────────────────────────────────────────────
   lint:
-    name: Lint
+    name: Lint (ruff)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Install ruff
         run: pip install ruff==0.7.0
+
       - name: Run ruff
         run: ruff check src/ tests/
 
+  # ── Tests ───────────────────────────────────────────────────────────────────
   test:
-    name: Test
+    name: Test (pytest + coverage)
     runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: sk-test-placeholder
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements-dev.txt') }}
           restore-keys: ${{ runner.os }}-pip-
+
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
-      - name: Run tests
-        run: pytest tests/ --ignore=tests/eval -v
+
+      - name: Run tests with coverage
+        run: pytest tests/ --ignore=tests/eval -v --cov=src --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false   # Don't fail CI on coverage upload errors
+
+  # ── Security scan ───────────────────────────────────────────────────────────
+  security:
+    name: Security (Trivy)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # Required to upload SARIF results
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"   # Warn but don't fail CI on findings
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: "trivy-results.sarif"

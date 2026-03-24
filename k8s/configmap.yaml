@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chatbot-config
+  namespace: k8s-rag-chatbot
+data:
+  # ── Core feature flags ──────────────────────────────────────────────────────
+  FF_USE_CHROMA: "true"
+  FF_USE_OPENAI: "true"
+  FF_USE_STREAMING: "false"
+  FF_USE_SESSION_MEMORY: "true"
+
+  # ── Security (Phase 2) ──────────────────────────────────────────────────────
+  FF_USE_PROMPT_INJECTION_DETECTION: "true"
+  FF_USE_PII_REDACTION: "true"
+  FF_USE_RATE_LIMITING: "true"
+  ENABLE_AUTH: "true"
+
+  # ── RAG quality (Phase 6) ───────────────────────────────────────────────────
+  FF_USE_HYBRID_SEARCH: "true"
+  FF_USE_RERANKING: "true"
+  FF_USE_QUERY_DECOMPOSITION: "true"
+  FF_USE_CITATION_VALIDATION: "false"  # Requires torch (~2 GB); enable if GPU available
+
+  # ── Advanced (Phase 9) ─────────────────────────────────────────────────────
+  FF_USE_MODEL_FALLBACK: "true"
+  FF_USE_SEMANTIC_CACHE: "false"       # Enable after faiss-cpu is confirmed working
+
+  # ── Models ─────────────────────────────────────────────────────────────────
+  LLM_MODEL: "gpt-4o-mini"
+  EMBEDDING_MODEL: "text-embedding-3-small"
+
+  # ── Observability ──────────────────────────────────────────────────────────
+  OTLP_ENDPOINT: "http://jaeger-collector:4317"
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+
+  # ── Cost controls ──────────────────────────────────────────────────────────
+  TOKEN_BUDGET_PER_REQUEST: "4000"
+  TOKEN_BUDGET_SESSION_DAILY: "100000"
+  TOKEN_BUDGET_GLOBAL_DAILY: "1000000"
+  COST_WARNING_THRESHOLD_USD: "10.0"
+  COST_HARD_LIMIT_USD: "50.0"
+
+  # ── Retrieval ──────────────────────────────────────────────────────────────
+  TOP_K_RESULTS: "5"
+
+  # ── Evaluation ─────────────────────────────────────────────────────────────
+  EVAL_SAMPLE_RATE: "0.1"
