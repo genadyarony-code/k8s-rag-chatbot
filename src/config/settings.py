@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     ff_use_session_memory: bool = True
     ff_use_streaming: bool = True
 
+    # ── Authentication ────────────────────────────────────────────────────────
+    # When false, /chat is unauthenticated (dev / demo mode).
+    # Set to true in production to enforce API key auth on all chat requests.
+    enable_auth: bool = False
+
     # ── Security ──────────────────────────────────────────────────────────────
     # Maximum input length in characters (5K is sufficient for any K8s question)
     max_input_length: int = 5000

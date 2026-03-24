@@ -17,6 +17,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 import chromadb
 from fastapi import FastAPI, HTTPException, Request
@@ -31,6 +32,8 @@ from src.agent.memory import session_memory
 from src.api.schemas import ChatRequest, ChatResponse, HealthResponse
 from src.config.settings import settings
 from src.observability.logging_config import configure_logging, get_logger
+from src.api.auth_routes import router as auth_router
+from src.auth.dependencies import optional_auth
 from src.cost_control.circuit_breaker import openai_breaker
 from src.observability.metrics import (
     chat_latency_seconds,
@@ -88,6 +91,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="K8s RAG Chatbot", version="1.0.0", lifespan=lifespan)
 
+# Auth routes (/auth/users, /auth/keys, /auth/me, etc.)
+app.include_router(auth_router)
+
 # Rate limiter — must be registered before any route decorators
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -95,9 +101,17 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.post("/chat")
 @limiter.limit(f"{settings.rate_limit_per_minute}/minute")
-async def chat(request: ChatRequest, req: Request):
+async def chat(
+    request: ChatRequest,
+    req: Request,
+    caller_id: Optional[str] = Depends(optional_auth),
+):
     """
     Main chat endpoint with security validation and metrics instrumentation.
+
+    Authentication is opt-in via the ENABLE_AUTH setting:
+    - ENABLE_AUTH=false (default/dev): no API key required
+    - ENABLE_AUTH=true  (production):  valid API key required
 
     Returns either a streaming SSE response or a full JSON response depending
     on the ff_use_streaming feature flag.
@@ -108,11 +122,18 @@ async def chat(request: ChatRequest, req: Request):
 
     Batch response format: ChatResponse JSON.
     """
+    # ── Auth enforcement ──────────────────────────────────────────────────────
+    if settings.enable_auth and not caller_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing authentication. Include 'Authorization: Bearer <api_key>' header.",
+        )
+
+    user_id: Optional[str] = caller_id  # None in dev/unauthenticated mode
+
     start_time = time.time()
 
     # ── Security validation ───────────────────────────────────────────────────
-    # validate_chat_input sanitizes, checks for prompt injection, and redacts PII.
-    # It raises HTTPException(400/413) on violations — re-raised automatically.
     validated_question = validate_chat_input(
         request.question,
         request.session_id,
@@ -123,6 +144,7 @@ async def chat(request: ChatRequest, req: Request):
 
     log.info(
         "chat_request_received",
+        user_id=user_id,
         session_id=request.session_id,
         question_length=len(validated_question),
     )
@@ -130,7 +152,7 @@ async def chat(request: ChatRequest, req: Request):
     try:
         if settings.ff_use_streaming:
             return StreamingResponse(
-                _stream_response(validated_question, request.session_id),
+                _stream_response(validated_question, request.session_id, user_id=user_id),
                 media_type="text/event-stream",
             )
         else:
@@ -138,7 +160,11 @@ async def chat(request: ChatRequest, req: Request):
             # block the event loop while waiting for the OpenAI response.
             result = await asyncio.to_thread(
                 graph.invoke,
-                {"question": validated_question, "session_id": request.session_id},
+                {
+                    "question": validated_question,
+                    "session_id": request.session_id,
+                    "user_id": user_id,
+                },
                 {"configurable": {"thread_id": request.session_id}},
             )
 
@@ -147,6 +173,7 @@ async def chat(request: ChatRequest, req: Request):
 
             log.info(
                 "chat_request_completed",
+                user_id=user_id,
                 session_id=request.session_id,
                 latency_seconds=round(elapsed, 3),
                 sources_count=len(result["sources"]),
@@ -163,6 +190,7 @@ async def chat(request: ChatRequest, req: Request):
     except Exception as e:
         log.error(
             "chat_request_failed",
+            user_id=user_id,
             session_id=request.session_id,
             error=str(e),
             exc_info=True,
@@ -170,7 +198,11 @@ async def chat(request: ChatRequest, req: Request):
         raise
 
 
-async def _stream_response(validated_question: str, session_id: str):
+async def _stream_response(
+    validated_question: str,
+    session_id: str,
+    user_id: Optional[str] = None,
+):
     """
     Async generator for the streaming chat path.
 
@@ -181,6 +213,7 @@ async def _stream_response(validated_question: str, session_id: str):
     Args:
         validated_question: Sanitized + PII-redacted question
         session_id: Session identifier
+        user_id: Authenticated user ID, or None in unauthenticated mode
     """
     from src.agent.nodes import retrieve_node
     from src.agent.prompts import build_prompt
@@ -189,7 +222,7 @@ async def _stream_response(validated_question: str, session_id: str):
     # Wrapped in to_thread because ChromaDB and the embeddings call are sync.
     state = await asyncio.to_thread(
         retrieve_node,
-        {"question": validated_question, "session_id": session_id},
+        {"question": validated_question, "session_id": session_id, "user_id": user_id},
     )
 
     # Step 2: Generation

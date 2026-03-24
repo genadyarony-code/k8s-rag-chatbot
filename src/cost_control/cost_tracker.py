@@ -96,6 +96,7 @@ class CostTracker:
         input_tokens: int = 0,
         output_tokens: int = 0,
         embedding_tokens: int = 0,
+        user_id: Optional[str] = None,
     ) -> tuple[float, bool]:
         """
         Record cost for a completed request and check alert thresholds.
@@ -121,6 +122,7 @@ class CostTracker:
 
         log.info(
             "cost_tracked",
+            user_id=user_id,
             session_id=session_id,
             model=model,
             cost_usd=round(cost, 8),

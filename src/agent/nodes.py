@@ -345,6 +345,7 @@ def generate_node(state: dict) -> dict:
         model=settings.llm_model,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        user_id=state.get("user_id"),
     )
 
     chat_tokens_total.labels(model=settings.llm_model).inc(total_tokens)
