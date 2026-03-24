@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     ff_use_session_memory: bool = True
     ff_use_streaming: bool = True
 
+    # ── Observability ─────────────────────────────────────────────────────────
+    # Set OTLP_ENDPOINT to send traces to Jaeger / Grafana Tempo / any OTel
+    # Collector. Leave unset to print spans to stdout (dev mode).
+    otlp_endpoint: str = ""          # e.g. "http://localhost:4317"
+    environment: str = "development" # development | staging | production
+    tracing_enabled: bool = True
+
     # ── Authentication ────────────────────────────────────────────────────────
     # When false, /chat is unauthenticated (dev / demo mode).
     # Set to true in production to enforce API key auth on all chat requests.

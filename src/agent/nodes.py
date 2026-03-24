@@ -31,6 +31,8 @@ from openai import OpenAI
 from src.agent.memory import session_memory
 from src.agent.prompts import build_prompt
 from src.config.settings import settings
+from opentelemetry.trace import Status, StatusCode
+
 from src.cost_control.circuit_breaker import (
     CircuitBreakerError,
     openai_breaker,
@@ -46,9 +48,11 @@ from src.observability.metrics import (
     generation_latency_seconds,
     retrieval_latency_seconds,
 )
+from src.observability.tracing import get_tracer
 
 _tokenizer = tiktoken.encoding_for_model("gpt-4o-mini")
 log = get_logger(__name__)
+tracer = get_tracer(__name__)
 
 
 # ── Lazy singletons ────────────────────────────────────────────────────────────
@@ -149,43 +153,56 @@ def retrieve_node(state: dict) -> dict:
     for troubleshooting questions, and loads session history.
     Returns the updated state with 'context' and 'history' populated.
     """
-    start_time = time.time()
-    question = state["question"]
-    session_id = state["session_id"]
+    with tracer.start_as_current_span("retrieve_node") as span:
+        start_time = time.time()
+        question = state["question"]
+        session_id = state["session_id"]
 
-    if settings.ff_use_chroma:
-        doc_type = _detect_doc_type(question)
-        context = _chroma_search(question, doc_type_filter=doc_type)
-        chroma_query_total.labels(doc_type_filter=str(doc_type)).inc()
+        span.set_attribute("session_id", session_id)
+        span.set_attribute("question_length", len(question))
+        span.set_attribute("use_chroma", settings.ff_use_chroma)
 
-        ROUTING_SCORE_THRESHOLD = 0.3
-        if not context or all(c["score"] < ROUTING_SCORE_THRESHOLD for c in context):
-            log.warning(
-                "routing_fallback_triggered",
-                session_id=session_id,
-                doc_type_filter=doc_type,
-                threshold=ROUTING_SCORE_THRESHOLD,
-            )
-            context = _chroma_search(question)
-            chroma_query_total.labels(doc_type_filter="fallback").inc()
-    else:
-        context = _bm25_search(question)
-        bm25_query_total.inc()
+        if settings.ff_use_chroma:
+            with tracer.start_as_current_span("detect_doc_type"):
+                doc_type = _detect_doc_type(question)
+            span.set_attribute("doc_type_filter", str(doc_type))
 
-    history = session_memory.get(session_id) if settings.ff_use_session_memory else []
+            with tracer.start_as_current_span("chroma_search"):
+                context = _chroma_search(question, doc_type_filter=doc_type)
+            chroma_query_total.labels(doc_type_filter=str(doc_type)).inc()
 
-    elapsed = time.time() - start_time
-    retrieval_latency_seconds.observe(elapsed)
+            ROUTING_SCORE_THRESHOLD = 0.3
+            if not context or all(c["score"] < ROUTING_SCORE_THRESHOLD for c in context):
+                log.warning(
+                    "routing_fallback_triggered",
+                    session_id=session_id,
+                    doc_type_filter=doc_type,
+                    threshold=ROUTING_SCORE_THRESHOLD,
+                )
+                with tracer.start_as_current_span("chroma_search_fallback"):
+                    context = _chroma_search(question)
+                chroma_query_total.labels(doc_type_filter="fallback").inc()
+        else:
+            with tracer.start_as_current_span("bm25_search"):
+                context = _bm25_search(question)
+            bm25_query_total.inc()
 
-    log.info(
-        "retrieval_completed",
-        session_id=session_id,
-        chunks_retrieved=len(context),
-        latency_seconds=round(elapsed, 3),
-        used_chroma=settings.ff_use_chroma,
-    )
+        history = session_memory.get(session_id) if settings.ff_use_session_memory else []
 
-    return {**state, "context": context, "history": history}
+        elapsed = time.time() - start_time
+        retrieval_latency_seconds.observe(elapsed)
+        span.set_attribute("chunks_retrieved", len(context))
+        span.set_attribute("latency_seconds", round(elapsed, 3))
+
+        log.info(
+            "retrieval_completed",
+            session_id=session_id,
+            chunks_retrieved=len(context),
+            latency_seconds=round(elapsed, 3),
+            used_chroma=settings.ff_use_chroma,
+        )
+
+        return {**state, "context": context, "history": history}
 
 
 def _chroma_search(question: str, doc_type_filter: str = None) -> list[dict]:
@@ -272,98 +289,114 @@ def generate_node(state: dict) -> dict:
 
     Returns the updated state with 'answer' and 'sources' populated.
     """
-    if not settings.ff_use_openai:
-        raw = "\n\n".join([f"[{c['section_title']}]\n{c['content']}" for c in state["context"]])
-        return {**state, "answer": raw, "sources": [c["source"] for c in state["context"]]}
+    with tracer.start_as_current_span("generate_node") as span:
+        span.set_attribute("session_id", state["session_id"])
+        span.set_attribute("use_openai", settings.ff_use_openai)
 
-    messages = build_prompt(state["question"], state["context"], state["history"])
-    estimated_tokens = sum(len(_tokenizer.encode(m.get("content", ""))) for m in messages)
+        if not settings.ff_use_openai:
+            raw = "\n\n".join([f"[{c['section_title']}]\n{c['content']}" for c in state["context"]])
+            return {**state, "answer": raw, "sources": [c["source"] for c in state["context"]]}
 
-    # ── Token budget check ────────────────────────────────────────────────────
-    budget = get_token_budget()
-    allowed, reason = budget.check_and_reserve(state["session_id"], estimated_tokens)
-    if not allowed:
-        log.error(
-            "request_blocked_by_budget",
+        messages = build_prompt(state["question"], state["context"], state["history"])
+        estimated_tokens = sum(len(_tokenizer.encode(m.get("content", ""))) for m in messages)
+        span.set_attribute("estimated_input_tokens", estimated_tokens)
+
+        # ── Token budget check ────────────────────────────────────────────────
+        budget = get_token_budget()
+        allowed, reason = budget.check_and_reserve(state["session_id"], estimated_tokens)
+        if not allowed:
+            log.error(
+                "request_blocked_by_budget",
+                session_id=state["session_id"],
+                estimated_tokens=estimated_tokens,
+                reason=reason,
+            )
+            span.set_attribute("blocked_by", "token_budget")
+            return {**state, "answer": f"Daily token budget exceeded. {reason}", "sources": []}
+
+        # ── Daily cost limit check ────────────────────────────────────────────
+        tracker = get_cost_tracker()
+        if not tracker.is_budget_available():
+            log.error(
+                "request_blocked_by_cost_limit",
+                session_id=state["session_id"],
+                daily_cost=tracker.get_stats()["daily_cost_usd"],
+            )
+            span.set_attribute("blocked_by", "cost_limit")
+            return {
+                **state,
+                "answer": "Daily cost limit exceeded. System is in degraded mode.",
+                "sources": [],
+            }
+
+        log.info(
+            "generation_started",
             session_id=state["session_id"],
-            estimated_tokens=estimated_tokens,
-            reason=reason,
+            input_tokens=estimated_tokens,
         )
-        return {**state, "answer": f"Daily token budget exceeded. {reason}", "sources": []}
 
-    # ── Daily cost limit check ────────────────────────────────────────────────
-    tracker = get_cost_tracker()
-    if not tracker.is_budget_available():
-        log.error(
-            "request_blocked_by_cost_limit",
+        start_time = time.time()
+        client = _get_openai_client()
+
+        with tracer.start_as_current_span("openai_completion") as llm_span:
+            llm_span.set_attribute("model", settings.llm_model)
+            llm_span.set_attribute("input_tokens", estimated_tokens)
+
+            try:
+                response = _call_openai_completion(
+                    client,
+                    model=settings.llm_model,
+                    messages=messages,
+                    temperature=0.1,
+                    stream=False,
+                )
+                llm_span.set_attribute("total_tokens", response.usage.total_tokens)
+                llm_span.set_attribute("output_tokens", response.usage.completion_tokens)
+            except CircuitBreakerError:
+                llm_span.set_status(Status(StatusCode.ERROR, "Circuit breaker open"))
+                log.error(
+                    "openai_circuit_breaker_open",
+                    session_id=state["session_id"],
+                    breaker_state=str(openai_breaker.current_state),
+                )
+                return {
+                    **state,
+                    "answer": "OpenAI service temporarily unavailable. Please try again shortly.",
+                    "sources": [],
+                }
+
+        answer = response.choices[0].message.content
+        total_tokens = response.usage.total_tokens
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+
+        # ── Cost tracking ─────────────────────────────────────────────────────
+        cost_usd, _ = tracker.track_request(
             session_id=state["session_id"],
-            daily_cost=tracker.get_stats()["daily_cost_usd"],
-        )
-        return {
-            **state,
-            "answer": "Daily cost limit exceeded. System is in degraded mode.",
-            "sources": [],
-        }
-
-    log.info(
-        "generation_started",
-        session_id=state["session_id"],
-        input_tokens=estimated_tokens,
-    )
-
-    start_time = time.time()
-    client = _get_openai_client()
-
-    try:
-        response = _call_openai_completion(
-            client,
             model=settings.llm_model,
-            messages=messages,
-            temperature=0.1,
-            stream=False,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            user_id=state.get("user_id"),
         )
-    except CircuitBreakerError:
-        log.error(
-            "openai_circuit_breaker_open",
+
+        chat_tokens_total.labels(model=settings.llm_model).inc(total_tokens)
+
+        elapsed = time.time() - start_time
+        generation_latency_seconds.observe(elapsed)
+        span.set_attribute("cost_usd", round(cost_usd, 8))
+        span.set_attribute("latency_seconds", round(elapsed, 3))
+
+        log.info(
+            "generation_completed",
             session_id=state["session_id"],
-            breaker_state=str(openai_breaker.current_state),
+            total_tokens=total_tokens,
+            cost_usd=round(cost_usd, 8),
+            latency_seconds=round(elapsed, 3),
         )
-        return {
-            **state,
-            "answer": "OpenAI service temporarily unavailable. Please try again shortly.",
-            "sources": [],
-        }
 
-    answer = response.choices[0].message.content
-    total_tokens = response.usage.total_tokens
-    input_tokens = response.usage.prompt_tokens
-    output_tokens = response.usage.completion_tokens
+        sources = list(set(c["source"] for c in state["context"]))
 
-    # ── Cost tracking ─────────────────────────────────────────────────────────
-    cost_usd, _ = tracker.track_request(
-        session_id=state["session_id"],
-        model=settings.llm_model,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        user_id=state.get("user_id"),
-    )
+        if settings.ff_use_session_memory:
+            session_memory.add(state["session_id"], state["question"], answer)
 
-    chat_tokens_total.labels(model=settings.llm_model).inc(total_tokens)
-
-    elapsed = time.time() - start_time
-    generation_latency_seconds.observe(elapsed)
-
-    log.info(
-        "generation_completed",
-        session_id=state["session_id"],
-        total_tokens=total_tokens,
-        cost_usd=round(cost_usd, 8),
-        latency_seconds=round(elapsed, 3),
-    )
-
-    sources = list(set(c["source"] for c in state["context"]))
-
-    if settings.ff_use_session_memory:
-        session_memory.add(state["session_id"], state["question"], answer)
-
-    return {**state, "answer": answer, "sources": sources}
+        return {**state, "answer": answer, "sources": sources}

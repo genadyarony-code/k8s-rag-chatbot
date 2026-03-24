@@ -12,6 +12,7 @@ Metrics exported:
 - bm25_query_total: Counter of BM25 fallback queries
 - index_health: Gauge for index availability
 - feature_flag_status: Gauge for each feature flag
+- circuit_breaker_state: Gauge for circuit breaker state (0=closed,1=half-open,2=open)
 
 Access at GET /metrics for Prometheus scraping.
 """
@@ -88,6 +89,15 @@ feature_flag_status = Gauge(
     "feature_flag_status",
     "Feature flag status (1=enabled, 0=disabled)",
     ["flag_name"],
+)
+
+# ── Circuit Breaker Metrics ───────────────────────────────────────────────────
+# State encoding: 0 = CLOSED (normal), 1 = HALF-OPEN (testing), 2 = OPEN (blocked)
+
+circuit_breaker_state = Gauge(
+    "circuit_breaker_state",
+    "Circuit breaker state (0=closed, 1=half-open, 2=open)",
+    ["breaker"],
 )
 
 

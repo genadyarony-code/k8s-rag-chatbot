@@ -23,6 +23,7 @@ from typing import Callable
 from pybreaker import CircuitBreaker, CircuitBreakerError, CircuitBreakerListener
 
 from src.observability.logging_config import get_logger
+from src.observability.metrics import circuit_breaker_state
 
 log = get_logger(__name__)
 
@@ -42,18 +43,21 @@ class _OpenAIBreakerListener(CircuitBreakerListener):
                 fail_count=cb.fail_counter,
                 message="OpenAI API circuit breaker OPENED - requests will be blocked",
             )
+            circuit_breaker_state.labels(breaker=cb.name).set(2)
         elif "half" in state_name:
             log.warning(
                 "circuit_breaker_half_open",
                 breaker_name=cb.name,
                 message="OpenAI API circuit breaker HALF-OPEN - testing recovery",
             )
+            circuit_breaker_state.labels(breaker=cb.name).set(1)
         elif "closed" in state_name:
             log.info(
                 "circuit_breaker_closed",
                 breaker_name=cb.name,
                 message="OpenAI API circuit breaker CLOSED - service recovered",
             )
+            circuit_breaker_state.labels(breaker=cb.name).set(0)
 
 
 openai_breaker = CircuitBreaker(

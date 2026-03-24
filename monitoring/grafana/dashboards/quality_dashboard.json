@@ -1,0 +1,92 @@
+{
+  "id": null,
+  "uid": "k8s-rag-quality",
+  "title": "K8s RAG Chatbot — Retrieval Quality",
+  "description": "Retrieval and generation latency, ChromaDB vs BM25 usage, and routing behaviour",
+  "tags": ["k8s-rag", "quality"],
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Retrieval Latency Percentiles",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.50, rate(retrieval_latency_seconds_bucket[5m]))",
+          "legendFormat": "P50"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.95, rate(retrieval_latency_seconds_bucket[5m]))",
+          "legendFormat": "P95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s", "color": { "mode": "palette-classic" } }
+      }
+    },
+    {
+      "id": 2,
+      "title": "LLM Generation Latency Percentiles",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.50, rate(generation_latency_seconds_bucket[5m]))",
+          "legendFormat": "P50"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.95, rate(generation_latency_seconds_bucket[5m]))",
+          "legendFormat": "P95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s", "color": { "mode": "palette-classic" } }
+      }
+    },
+    {
+      "id": 3,
+      "title": "ChromaDB vs BM25 Query Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "rate(chroma_query_total[5m])",
+          "legendFormat": "ChromaDB ({{doc_type_filter}})"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "rate(bm25_query_total[5m])",
+          "legendFormat": "BM25"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "color": { "mode": "palette-classic" } }
+      }
+    },
+    {
+      "id": 4,
+      "title": "ChromaDB Routing Breakdown",
+      "type": "piechart",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "increase(chroma_query_total[1h])",
+          "legendFormat": "{{doc_type_filter}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }
+      }
+    }
+  ]
+}

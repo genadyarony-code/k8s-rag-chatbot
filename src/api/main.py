@@ -32,6 +32,7 @@ from src.agent.memory import session_memory
 from src.api.schemas import ChatRequest, ChatResponse, HealthResponse
 from src.config.settings import settings
 from src.observability.logging_config import configure_logging, get_logger
+from src.observability.tracing import configure_tracing
 from src.api.auth_routes import router as auth_router
 from src.auth.dependencies import optional_auth
 from src.cost_control.circuit_breaker import openai_breaker
@@ -84,6 +85,14 @@ def check_index_health():
 async def lifespan(app: FastAPI):
     configure_logging(log_level="INFO")
     log.info("application_startup", version="1.0.0")
+
+    if settings.tracing_enabled:
+        configure_tracing(app)
+        log.info(
+            "tracing_enabled",
+            otlp_endpoint=settings.otlp_endpoint or "console",
+        )
+
     check_index_health()
     yield
     log.info("application_shutdown")
