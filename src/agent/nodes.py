@@ -48,6 +48,7 @@ from src.observability.metrics import (
     generation_latency_seconds,
     retrieval_latency_seconds,
 )
+from src.advanced.model_fallback import get_fallback_handler
 from src.hitl.confidence import calculate_confidence, get_confidence_level
 from src.observability.tracing import get_tracer
 from src.rag.hybrid_search import hybrid_search
@@ -177,6 +178,28 @@ def retrieve_node(state: dict) -> dict:
         span.set_attribute("session_id", session_id)
         span.set_attribute("question_length", len(question))
         span.set_attribute("use_chroma", settings.ff_use_chroma)
+
+        # ── 0. Semantic cache ─────────────────────────────────────────────────
+        if settings.ff_use_semantic_cache:
+            from src.advanced.semantic_cache import get_semantic_cache
+            cached = get_semantic_cache().get(question)
+            if cached:
+                log.info(
+                    "semantic_cache_hit",
+                    session_id=session_id,
+                    question_preview=question[:60],
+                )
+                span.set_attribute("from_cache", True)
+                return {
+                    **state,
+                    "context": [],
+                    "history": session_memory.get(session_id) if settings.ff_use_session_memory else [],
+                    "answer": cached["answer"],
+                    "sources": cached["sources"],
+                    "confidence": cached.get("metadata", {}).get("confidence"),
+                    "confidence_level": cached.get("metadata", {}).get("confidence_level", "medium"),
+                    "from_cache": True,
+                }
 
         # ── 1. Query decomposition ────────────────────────────────────────────
         if settings.ff_use_query_decomposition:
@@ -376,6 +399,11 @@ def generate_node(state: dict) -> dict:
         span.set_attribute("session_id", state["session_id"])
         span.set_attribute("use_openai", settings.ff_use_openai)
 
+        # Skip generation entirely on cache hits — answer already populated
+        if state.get("from_cache"):
+            log.info("generation_skipped_cache_hit", session_id=state["session_id"])
+            return state
+
         if not settings.ff_use_openai:
             raw = "\n\n".join([f"[{c['section_title']}]\n{c['content']}" for c in state["context"]])
             return {**state, "answer": raw, "sources": [c["source"] for c in state["context"]]}
@@ -430,35 +458,66 @@ def generate_node(state: dict) -> dict:
             llm_span.set_attribute("model", settings.llm_model)
             llm_span.set_attribute("input_tokens", estimated_tokens)
 
-            try:
-                response = _call_openai_completion(
-                    client,
-                    model=settings.llm_model,
-                    messages=messages,
-                    temperature=0.1,
-                    stream=False,
-                )
-                llm_span.set_attribute("total_tokens", response.usage.total_tokens)
-                llm_span.set_attribute("output_tokens", response.usage.completion_tokens)
-            except CircuitBreakerError:
-                llm_span.set_status(Status(StatusCode.ERROR, "Circuit breaker open"))
-                log.error(
-                    "openai_circuit_breaker_open",
-                    session_id=state["session_id"],
-                    breaker_state=str(openai_breaker.current_state),
-                )
-                return {
-                    **state,
-                    "answer": "OpenAI service temporarily unavailable. Please try again shortly.",
-                    "sources": [],
-                    "confidence": 0.0,
-                    "confidence_level": "low",
-                }
-
-        answer = response.choices[0].message.content
-        total_tokens = response.usage.total_tokens
-        input_tokens = response.usage.prompt_tokens
-        output_tokens = response.usage.completion_tokens
+            if settings.ff_use_model_fallback:
+                # Model fallback cascade — tries gpt-4o-mini → gpt-3.5-turbo
+                # (→ claude-3-haiku if ANTHROPIC_API_KEY is set)
+                try:
+                    fb_result = get_fallback_handler().call_with_fallback(
+                        messages=messages,
+                        temperature=0.1,
+                        max_tokens=1000,
+                        session_id=state["session_id"],
+                    )
+                    answer = fb_result["content"]
+                    total_tokens = fb_result["total_tokens"]
+                    input_tokens = fb_result["input_tokens"]
+                    output_tokens = fb_result["output_tokens"]
+                    llm_span.set_attribute("model_used", fb_result["model"])
+                    llm_span.set_attribute("provider", fb_result["provider"])
+                    llm_span.set_attribute("total_tokens", total_tokens)
+                except RuntimeError:
+                    llm_span.set_status(Status(StatusCode.ERROR, "All models failed"))
+                    log.error(
+                        "all_models_failed",
+                        session_id=state["session_id"],
+                    )
+                    return {
+                        **state,
+                        "answer": "All AI models are currently unavailable. Please try again shortly.",
+                        "sources": [],
+                        "confidence": 0.0,
+                        "confidence_level": "low",
+                    }
+            else:
+                # Original single-model path with circuit breaker
+                try:
+                    response = _call_openai_completion(
+                        client,
+                        model=settings.llm_model,
+                        messages=messages,
+                        temperature=0.1,
+                        stream=False,
+                    )
+                    llm_span.set_attribute("total_tokens", response.usage.total_tokens)
+                    llm_span.set_attribute("output_tokens", response.usage.completion_tokens)
+                except CircuitBreakerError:
+                    llm_span.set_status(Status(StatusCode.ERROR, "Circuit breaker open"))
+                    log.error(
+                        "openai_circuit_breaker_open",
+                        session_id=state["session_id"],
+                        breaker_state=str(openai_breaker.current_state),
+                    )
+                    return {
+                        **state,
+                        "answer": "OpenAI service temporarily unavailable. Please try again shortly.",
+                        "sources": [],
+                        "confidence": 0.0,
+                        "confidence_level": "low",
+                    }
+                answer = response.choices[0].message.content
+                total_tokens = response.usage.total_tokens
+                input_tokens = response.usage.prompt_tokens
+                output_tokens = response.usage.completion_tokens
 
         # ── Citation validation ───────────────────────────────────────────────
         # Default to True (optimistic) when validation is disabled
@@ -526,6 +585,16 @@ def generate_node(state: dict) -> dict:
 
         if settings.ff_use_session_memory:
             session_memory.add(state["session_id"], state["question"], answer)
+
+        # Cache the result for future identical/similar questions
+        if settings.ff_use_semantic_cache:
+            from src.advanced.semantic_cache import get_semantic_cache
+            get_semantic_cache().set(
+                question=state["question"],
+                answer=answer,
+                sources=sources,
+                metadata={"confidence": confidence, "confidence_level": confidence_level},
+            )
 
         return {
             **state,

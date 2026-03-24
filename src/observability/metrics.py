@@ -142,6 +142,33 @@ ab_test_assignments = Counter(
 )
 
 
+# ── Advanced Feature Metrics ─────────────────────────────────────────────────
+
+cache_hits = Counter(
+    "cache_hits_total",
+    "Semantic cache hits",
+    ["cache_type"],
+)
+
+cache_misses = Counter(
+    "cache_misses_total",
+    "Semantic cache misses",
+    ["cache_type"],
+)
+
+cache_hit_rate = Gauge(
+    "cache_hit_rate",
+    "Rolling cache hit rate (hits / (hits + misses))",
+    ["cache_type"],
+)
+
+model_fallback_attempts = Counter(
+    "model_fallback_attempts_total",
+    "Number of times a fallback model was tried",
+    ["from_model", "to_model", "reason"],
+)
+
+
 def get_metrics() -> bytes:
     """
     Generate Prometheus exposition format.

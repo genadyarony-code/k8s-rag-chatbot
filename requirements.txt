@@ -50,6 +50,10 @@ structlog==24.1.0
 python-json-logger==2.0.7
 prometheus-client==0.20.0
 
+# Advanced features — Phase 9
+faiss-cpu==1.7.4  # Vector index for semantic caching
+# anthropic==0.20.0  # Uncomment for Claude model fallback (optional)
+
 # HITL approval queue (celery is optional — only needed for distributed background approvals)
 # celery==5.3.4  # Uncomment when adding background task workers
 

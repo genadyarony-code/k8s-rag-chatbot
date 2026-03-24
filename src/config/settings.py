@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     # Disabled by default — sentence-transformers adds ~2 GB to the Docker image
     ff_use_citation_validation: bool = False
 
+    # ── Advanced features — Phase 9 ──────────────────────────────────────────
+    # Optional Anthropic API key for model fallback cascade (Claude)
+    anthropic_api_key: str = ""
+    # Semantic cache: cosine similarity threshold for cache hit (0–1)
+    semantic_cache_threshold: float = 0.95
+    ff_use_semantic_cache: bool = False   # Requires faiss-cpu
+    ff_use_model_fallback: bool = True    # Cascade through GPT models on failure
+
     # ── HITL / Approval queue ─────────────────────────────────────────────────
     # Set to a Redis URL (e.g. redis://localhost:6379/0) to use Redis-backed
     # approval queue. Leave empty to use the in-memory fallback (dev only).
