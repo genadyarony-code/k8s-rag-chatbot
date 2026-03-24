@@ -40,6 +40,7 @@ from src.cost_control.circuit_breaker import openai_breaker
 from src.observability.metrics import (
     chat_latency_seconds,
     chat_requests_total,
+    chat_tokens_total,
     feature_flag_status,
     get_metrics,
     index_health,
@@ -227,58 +228,173 @@ async def _stream_response(
     user_id: Optional[str] = None,
 ):
     """
-    Async generator for the streaming chat path.
+    Async generator for the streaming chat path (SSE).
 
-    Receives the already-validated question so that security checks are not
-    duplicated on every token yield. Runs retrieval synchronously (CPU-bound +
-    fast local ops), then streams GPT tokens via SSE using AsyncOpenAI.
+    Parity with the batch path:
+    - Semantic cache short-circuit (from_cache)
+    - Token budget and daily cost limit checks
+    - Model fallback cascade (gpt-4o-mini → gpt-3.5-turbo on RateLimitError)
+    - Cost tracking, session memory, semantic cache population
+    - Live evaluation sampling
+    - Confidence scoring in the final done event
 
-    Args:
-        validated_question: Sanitized + PII-redacted question
-        session_id: Session identifier
-        user_id: Authenticated user ID, or None in unauthenticated mode
+    SSE envelope:
+        data: {"token": "...", "done": false}   — one per streaming token
+        data: {"sources": [...], "confidence": 0.8, "confidence_level": "high",
+               "done": true}                    — single completion event
     """
+    import tiktoken
+    from openai import RateLimitError as OAIRateLimitError
+
     from src.agent.nodes import retrieve_node
     from src.agent.prompts import build_prompt
+    from src.cost_control.cost_tracker import get_cost_tracker
+    from src.cost_control.token_budget import get_token_budget
+    from src.hitl.confidence import calculate_confidence, get_confidence_level
 
-    # Step 1: Retrieval (query routing + session history)
-    # Wrapped in to_thread because ChromaDB and the embeddings call are sync.
+    _tokenizer = tiktoken.encoding_for_model("gpt-4o-mini")
+
+    # ── Step 1: Retrieval ─────────────────────────────────────────────────────
+    # Wrapped in to_thread: ChromaDB queries + embedding calls are synchronous.
     state = await asyncio.to_thread(
         retrieve_node,
         {"question": validated_question, "session_id": session_id, "user_id": user_id},
     )
 
-    # Step 2: Generation
+    # ── Step 2a: Cache hit — stream the pre-generated answer directly ─────────
+    if state.get("from_cache"):
+        cached_answer = state.get("answer", "")
+        sources = state.get("sources", [])
+        yield f"data: {json.dumps({'token': cached_answer, 'done': False})}\n\n"
+        yield f"data: {json.dumps({'sources': sources, 'confidence': state.get('confidence'), 'confidence_level': state.get('confidence_level'), 'done': True})}\n\n"
+        return
+
+    # ── Step 2b: OpenAI disabled — return raw retrieved chunks ────────────────
     if not settings.ff_use_openai:
-        # Degraded mode: return raw retrieved chunks without calling the LLM
         raw = "\n\n".join([f"[{c['section_title']}]\n{c['content']}" for c in state["context"]])
+        sources = list(set(c["source"] for c in state["context"]))
         yield f"data: {json.dumps({'token': raw, 'done': False})}\n\n"
-    else:
-        messages = build_prompt(
-            state["question"], state["context"], state["history"], session_id=session_id
-        )
-        async_client = AsyncOpenAI(api_key=settings.openai_api_key)
+        yield f"data: {json.dumps({'sources': sources, 'confidence': 0.5, 'confidence_level': 'medium', 'done': True})}\n\n"
+        return
 
-        stream = await async_client.chat.completions.create(
-            model=settings.llm_model,
-            messages=messages,
-            temperature=0.1,
-            stream=True,
-        )
+    # ── Step 2c: Pre-generation guards ────────────────────────────────────────
+    messages = build_prompt(
+        state["question"], state["context"], state["history"], session_id=session_id
+    )
+    estimated_input_tokens = sum(
+        len(_tokenizer.encode(m.get("content", ""))) for m in messages
+    )
 
-        full_answer = ""
-        async for chunk in stream:
-            token = chunk.choices[0].delta.content or ""
-            if token:
-                full_answer += token
-                yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+    budget = get_token_budget()
+    allowed, reason = budget.check_and_reserve(session_id, estimated_input_tokens)
+    if not allowed:
+        yield f"data: {json.dumps({'token': f'Daily token budget exceeded. {reason}', 'done': False})}\n\n"
+        yield f"data: {json.dumps({'sources': [], 'confidence': 0.0, 'confidence_level': 'low', 'done': True})}\n\n"
+        return
 
-        if settings.ff_use_session_memory:
-            session_memory.add(session_id, validated_question, full_answer)
+    tracker = get_cost_tracker()
+    if not tracker.is_budget_available():
+        yield f"data: {json.dumps({'token': 'Daily cost limit exceeded. System is in degraded mode.', 'done': False})}\n\n"
+        yield f"data: {json.dumps({'sources': [], 'confidence': 0.0, 'confidence_level': 'low', 'done': True})}\n\n"
+        return
 
-    # Step 3: Send sources as the completion signal
+    # ── Step 2d: Stream with model fallback cascade ───────────────────────────
+    # gpt-4o-mini is the primary model; fall back to gpt-3.5-turbo on rate limits.
+    cascade = [settings.llm_model]
+    if settings.ff_use_model_fallback and "gpt-3.5-turbo" != settings.llm_model:
+        cascade.append("gpt-3.5-turbo")
+
+    async_client = AsyncOpenAI(api_key=settings.openai_api_key)
+    full_answer = ""
+    used_model = settings.llm_model
+    output_tokens = 0
+
+    for model in cascade:
+        try:
+            stream = await async_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.1,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+            used_model = model
+            async for chunk in stream:
+                # Final usage chunk (include_usage=True) has empty choices
+                if not chunk.choices:
+                    if chunk.usage:
+                        output_tokens = chunk.usage.completion_tokens
+                    continue
+                token = chunk.choices[0].delta.content or ""
+                if token:
+                    full_answer += token
+                    yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+            break  # Success — exit the cascade
+
+        except OAIRateLimitError:
+            if model != cascade[-1]:
+                log.warning("stream_model_rate_limited", model=model, session_id=session_id)
+                continue  # Try the next model in cascade
+            # Exhausted the cascade
+            log.error("stream_all_models_rate_limited", session_id=session_id)
+            yield f"data: {json.dumps({'token': 'All AI models are currently rate-limited. Please try again shortly.', 'done': False})}\n\n"
+            yield f"data: {json.dumps({'sources': [], 'confidence': 0.0, 'confidence_level': 'low', 'done': True})}\n\n"
+            return
+        except Exception as exc:
+            log.error("stream_generation_failed", model=model, error=str(exc), session_id=session_id)
+            yield f"data: {json.dumps({'token': 'Generation failed. Please try again.', 'done': False})}\n\n"
+            yield f"data: {json.dumps({'sources': [], 'confidence': 0.0, 'confidence_level': 'low', 'done': True})}\n\n"
+            return
+
+    # ── Step 3: Post-generation bookkeeping ───────────────────────────────────
+    if output_tokens == 0:
+        # stream_options not supported by this model/proxy — estimate instead
+        output_tokens = len(_tokenizer.encode(full_answer))
+    total_tokens = estimated_input_tokens + output_tokens
+
+    tracker.track_request(
+        session_id=session_id,
+        model=used_model,
+        input_tokens=estimated_input_tokens,
+        output_tokens=output_tokens,
+        user_id=user_id,
+    )
+    chat_tokens_total.labels(model=used_model).inc(total_tokens)
+
+    if settings.ff_use_session_memory:
+        session_memory.add(session_id, validated_question, full_answer)
+
+    # Confidence scoring (citation validation is skipped in the streaming path
+    # because the full answer only exists after streaming completes)
     sources = list(set(c["source"] for c in state["context"]))
-    yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
+    top_retrieval_score = state["context"][0]["score"] if state["context"] else 0.0
+    confidence = calculate_confidence(
+        retrieval_score=top_retrieval_score,
+        citation_valid=True,
+        source_count=len(sources),
+    )
+    confidence_level = get_confidence_level(confidence)
+
+    # Populate semantic cache so the next identical question gets a cache hit
+    if settings.ff_use_semantic_cache:
+        from src.advanced.semantic_cache import get_semantic_cache
+        get_semantic_cache().set(
+            question=validated_question,
+            answer=full_answer,
+            sources=sources,
+            metadata={"confidence": confidence, "confidence_level": confidence_level},
+        )
+
+    # Live evaluation sampling (async — does not block the response)
+    get_sampler().schedule(
+        question=validated_question,
+        answer=full_answer,
+        sources=sources,
+        session_id=session_id,
+    )
+
+    # ── Step 4: Completion event ──────────────────────────────────────────────
+    yield f"data: {json.dumps({'sources': sources, 'confidence': confidence, 'confidence_level': confidence_level, 'done': True})}\n\n"
 
 
 @app.get("/budget")

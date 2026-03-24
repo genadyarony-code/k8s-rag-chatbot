@@ -27,8 +27,22 @@ _DEFAULT_BASELINE = "tests/eval/baseline.json"
 
 
 def load_baseline(path: str = _DEFAULT_BASELINE) -> dict:
-    """Load a baseline evaluation report from disk."""
-    with open(path) as f:
+    """
+    Load a baseline evaluation report from disk.
+
+    Raises:
+        FileNotFoundError: if the baseline file does not exist yet. Callers
+            that expect the file may not exist yet should check
+            ``Path(path).exists()`` before calling, or catch this exception.
+    """
+    baseline_path = Path(path)
+    if not baseline_path.exists():
+        raise FileNotFoundError(
+            f"Baseline file not found at '{path}'. "
+            "Run the evaluator once with SAVE_BASELINE=true to create it:\n"
+            "  SAVE_BASELINE=true python tests/eval/run_eval.py"
+        )
+    with open(baseline_path) as f:
         return json.load(f)
 
 

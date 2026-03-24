@@ -10,10 +10,18 @@ Options (set via env vars):
 
 Workflow:
     # First run — establish a baseline
-    python tests/eval/run_eval.py SAVE_BASELINE=true
+    SAVE_BASELINE=true python tests/eval/run_eval.py
 
     # After code changes — compare against baseline
     python tests/eval/run_eval.py
+
+    # Override the dataset path
+    EVAL_DATASET=path/to/custom_dataset.json python tests/eval/run_eval.py
+
+Note: SAVE_BASELINE and EVAL_DATASET are environment variables, not CLI
+arguments. The prefix syntax (VAR=value python ...) works on Linux/macOS.
+On Windows PowerShell use:
+    $env:SAVE_BASELINE="true"; python tests/eval/run_eval.py
 """
 
 import asyncio

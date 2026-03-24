@@ -74,10 +74,25 @@ async def optional_auth(api_key: Optional[str] = Depends(get_api_key)) -> Option
     """
     Attempt authentication but do not raise if no key is provided.
 
+    Mirrors the same validation logic as require_auth (key validity + active
+    account check) but returns None instead of raising on failure, so callers
+    can decide whether to enforce authentication themselves.
+
     Returns:
-        user_id if authenticated, None otherwise.
+        user_id if authenticated and account is active, None otherwise.
     """
     if not api_key:
         return None
+
     is_valid, user_id = validate_api_key(api_key)
-    return user_id if is_valid else None
+    if not is_valid or not user_id:
+        log_auth_event("authentication", user_id=None, result="failure", reason="invalid_key")
+        return None
+
+    storage = get_auth_storage()
+    user = storage.get_user(user_id)
+    if not user or not user.is_active:
+        log_auth_event("authentication", user_id=user_id, result="denied", reason="account_inactive")
+        return None
+
+    return user_id

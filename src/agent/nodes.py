@@ -406,7 +406,13 @@ def generate_node(state: dict) -> dict:
 
         if not settings.ff_use_openai:
             raw = "\n\n".join([f"[{c['section_title']}]\n{c['content']}" for c in state["context"]])
-            return {**state, "answer": raw, "sources": [c["source"] for c in state["context"]]}
+            return {
+                **state,
+                "answer": raw,
+                "sources": [c["source"] for c in state["context"]],
+                "confidence": 0.5,
+                "confidence_level": "medium",
+            }
 
         messages = build_prompt(
             state["question"],
@@ -428,7 +434,13 @@ def generate_node(state: dict) -> dict:
                 reason=reason,
             )
             span.set_attribute("blocked_by", "token_budget")
-            return {**state, "answer": f"Daily token budget exceeded. {reason}", "sources": []}
+            return {
+                **state,
+                "answer": f"Daily token budget exceeded. {reason}",
+                "sources": [],
+                "confidence": 0.0,
+                "confidence_level": "low",
+            }
 
         # ── Daily cost limit check ────────────────────────────────────────────
         tracker = get_cost_tracker()
@@ -443,6 +455,8 @@ def generate_node(state: dict) -> dict:
                 **state,
                 "answer": "Daily cost limit exceeded. System is in degraded mode.",
                 "sources": [],
+                "confidence": 0.0,
+                "confidence_level": "low",
             }
 
         log.info(
