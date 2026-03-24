@@ -50,6 +50,9 @@ structlog==24.1.0
 python-json-logger==2.0.7
 prometheus-client==0.20.0
 
+# HITL approval queue (celery is optional — only needed for distributed background approvals)
+# celery==5.3.4  # Uncomment when adding background task workers
+
 # RAG quality
 flashrank==0.2.4
 # sentence-transformers pulls ~2 GB of PyTorch. Only needed when

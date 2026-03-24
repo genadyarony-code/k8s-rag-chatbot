@@ -34,6 +34,7 @@ from src.config.settings import settings
 from src.observability.logging_config import configure_logging, get_logger
 from src.observability.tracing import configure_tracing
 from src.api.auth_routes import router as auth_router
+from src.api.approval_routes import router as approval_router
 from src.auth.dependencies import optional_auth
 from src.cost_control.circuit_breaker import openai_breaker
 from src.observability.metrics import (
@@ -103,6 +104,8 @@ app = FastAPI(title="K8s RAG Chatbot", version="1.0.0", lifespan=lifespan)
 
 # Auth routes (/auth/users, /auth/keys, /auth/me, etc.)
 app.include_router(auth_router)
+# Approval workflow (/approvals, /approvals/{id}/approve, etc.)
+app.include_router(approval_router)
 
 # Rate limiter — must be registered before any route decorators
 app.state.limiter = limiter
@@ -201,6 +204,8 @@ async def chat(
                 answer=result["answer"],
                 sources=result["sources"],
                 session_id=request.session_id,
+                confidence=result.get("confidence"),
+                confidence_level=result.get("confidence_level"),
             )
 
     except HTTPException:

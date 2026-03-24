@@ -48,6 +48,7 @@ from src.observability.metrics import (
     generation_latency_seconds,
     retrieval_latency_seconds,
 )
+from src.hitl.confidence import calculate_confidence, get_confidence_level
 from src.observability.tracing import get_tracer
 from src.rag.hybrid_search import hybrid_search
 from src.rag.query_decomposition import decompose_query
@@ -450,6 +451,8 @@ def generate_node(state: dict) -> dict:
                     **state,
                     "answer": "OpenAI service temporarily unavailable. Please try again shortly.",
                     "sources": [],
+                    "confidence": 0.0,
+                    "confidence_level": "low",
                 }
 
         answer = response.choices[0].message.content
@@ -458,21 +461,44 @@ def generate_node(state: dict) -> dict:
         output_tokens = response.usage.completion_tokens
 
         # ── Citation validation ───────────────────────────────────────────────
+        # Default to True (optimistic) when validation is disabled
+        citation_is_valid = True
         if settings.ff_use_citation_validation:
             with tracer.start_as_current_span("citation_validation") as cv_span:
                 from src.rag.citation_validator import get_validator
-                is_valid, unsupported = get_validator().validate(
+                citation_is_valid, unsupported = get_validator().validate(
                     answer, state["context"], threshold=0.5
                 )
-                cv_span.set_attribute("citations_valid", is_valid)
+                cv_span.set_attribute("citations_valid", citation_is_valid)
                 cv_span.set_attribute("unsupported_claims", len(unsupported))
-                if not is_valid:
+                if not citation_is_valid:
                     log.warning(
                         "answer_contains_unsupported_claims",
                         session_id=state["session_id"],
                         unsupported_count=len(unsupported),
                         unsupported_preview=[s[:60] for s in unsupported[:3]],
                     )
+
+        # ── Confidence scoring ────────────────────────────────────────────────
+        sources = list(set(c["source"] for c in state["context"]))
+        top_retrieval_score = state["context"][0]["score"] if state["context"] else 0.0
+
+        confidence = calculate_confidence(
+            retrieval_score=top_retrieval_score,
+            citation_valid=citation_is_valid,
+            source_count=len(sources),
+        )
+        confidence_level = get_confidence_level(confidence)
+        span.set_attribute("confidence_score", round(confidence, 3))
+        span.set_attribute("confidence_level", confidence_level)
+
+        log.info(
+            "response_confidence_calculated",
+            session_id=state["session_id"],
+            confidence=round(confidence, 3),
+            level=confidence_level,
+            top_retrieval_score=round(top_retrieval_score, 3),
+        )
 
         # ── Cost tracking ─────────────────────────────────────────────────────
         cost_usd, _ = tracker.track_request(
@@ -498,9 +524,13 @@ def generate_node(state: dict) -> dict:
             latency_seconds=round(elapsed, 3),
         )
 
-        sources = list(set(c["source"] for c in state["context"]))
-
         if settings.ff_use_session_memory:
             session_memory.add(state["session_id"], state["question"], answer)
 
-        return {**state, "answer": answer, "sources": sources}
+        return {
+            **state,
+            "answer": answer,
+            "sources": sources,
+            "confidence": confidence,
+            "confidence_level": confidence_level,
+        }

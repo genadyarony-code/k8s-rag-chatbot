@@ -4,6 +4,7 @@ so malformed requests get a 422 before they reach any business logic.
 """
 
 import uuid
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
@@ -24,8 +25,11 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     """Response for POST /chat when FF_USE_STREAMING is disabled (batch mode)."""
     answer: str
-    sources: list[str]   # filenames of documents cited in the answer
+    sources: list[str]          # filenames of documents cited in the answer
     session_id: str
+    # HITL confidence fields — always present from Phase 8 onwards
+    confidence: Optional[float] = None        # composite score 0–1
+    confidence_level: Optional[str] = None    # "high" | "medium" | "low"
 
 
 class HealthResponse(BaseModel):

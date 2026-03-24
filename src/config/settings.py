@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # Disabled by default — sentence-transformers adds ~2 GB to the Docker image
     ff_use_citation_validation: bool = False
 
+    # ── HITL / Approval queue ─────────────────────────────────────────────────
+    # Set to a Redis URL (e.g. redis://localhost:6379/0) to use Redis-backed
+    # approval queue. Leave empty to use the in-memory fallback (dev only).
+    redis_url: str = ""
+
     # ── Evaluation settings ───────────────────────────────────────────────────
     # Fraction of live /chat requests to evaluate with LLM-as-judge (0.0–1.0).
     # Evaluation runs asynchronously after the response is sent, so users never
