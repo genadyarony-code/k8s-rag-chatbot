@@ -100,6 +100,31 @@ circuit_breaker_state = Gauge(
     ["breaker"],
 )
 
+# ── RAG Quality Metrics ───────────────────────────────────────────────────────
+
+reranking_improvement = Histogram(
+    "reranking_improvement",
+    "Score delta between rerank score and original vector/RRF score",
+    buckets=[-1.0, -0.5, -0.1, 0.0, 0.1, 0.2, 0.5, 1.0, 2.0],
+)
+
+hybrid_search_fusion_score = Histogram(
+    "hybrid_search_fusion_score",
+    "RRF fusion score of the top-ranked document",
+    buckets=[0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5],
+)
+
+citation_validation_failures = Counter(
+    "citation_validation_failures_total",
+    "Number of generated answers that contained at least one unsupported sentence",
+)
+
+query_decomposition_count = Counter(
+    "query_decomposition_total",
+    "Number of queries that triggered LLM-based decomposition",
+    ["sub_query_count"],
+)
+
 
 def get_metrics() -> bytes:
     """

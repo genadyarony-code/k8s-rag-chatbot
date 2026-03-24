@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     ff_use_openai: bool = True
     ff_use_session_memory: bool = True
     ff_use_streaming: bool = True
+    # RAG quality flags — individually toggleable to test each improvement
+    ff_use_hybrid_search: bool = True       # RRF fusion of ChromaDB + BM25
+    ff_use_reranking: bool = True           # FlashRank cross-encoder reranking
+    ff_use_query_decomposition: bool = True  # LLM-based query decomposition
+    # Disabled by default — sentence-transformers adds ~2 GB to the Docker image
+    ff_use_citation_validation: bool = False
 
     # ── Observability ─────────────────────────────────────────────────────────
     # Set OTLP_ENDPOINT to send traces to Jaeger / Grafana Tempo / any OTel

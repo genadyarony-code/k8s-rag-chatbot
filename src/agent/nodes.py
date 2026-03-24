@@ -49,6 +49,9 @@ from src.observability.metrics import (
     retrieval_latency_seconds,
 )
 from src.observability.tracing import get_tracer
+from src.rag.hybrid_search import hybrid_search
+from src.rag.query_decomposition import decompose_query
+from src.rag.reranker import get_reranker
 
 _tokenizer = tiktoken.encoding_for_model("gpt-4o-mini")
 log = get_logger(__name__)
@@ -149,10 +152,22 @@ def retrieve_node(state: dict) -> dict:
     """
     LangGraph node — retrieval step.
 
-    Selects ChromaDB or BM25 based on ff_use_chroma, applies query routing
-    for troubleshooting questions, and loads session history.
+    Pipeline (each stage is individually gated by a feature flag):
+    1. Query decomposition — splits complex / comparison questions into
+       independent sub-queries (ff_use_query_decomposition).
+    2. Hybrid search — RRF fusion of ChromaDB dense + BM25 sparse results
+       with doc-type routing preserved (ff_use_hybrid_search).
+       Falls back to single-source search when flag is off.
+    3. Reranking — FlashRank cross-encoder reorders candidates by true
+       relevance (ff_use_reranking).
+    4. Deduplication + limiting — merge results from all sub-queries and
+       keep at most 10 unique chunks.
+
     Returns the updated state with 'context' and 'history' populated.
     """
+    # Retrieval candidates per sub-query before reranking
+    CANDIDATE_COUNT = 20
+
     with tracer.start_as_current_span("retrieve_node") as span:
         start_time = time.time()
         question = state["question"]
@@ -162,30 +177,84 @@ def retrieve_node(state: dict) -> dict:
         span.set_attribute("question_length", len(question))
         span.set_attribute("use_chroma", settings.ff_use_chroma)
 
-        if settings.ff_use_chroma:
-            with tracer.start_as_current_span("detect_doc_type"):
-                doc_type = _detect_doc_type(question)
-            span.set_attribute("doc_type_filter", str(doc_type))
-
-            with tracer.start_as_current_span("chroma_search"):
-                context = _chroma_search(question, doc_type_filter=doc_type)
-            chroma_query_total.labels(doc_type_filter=str(doc_type)).inc()
-
-            ROUTING_SCORE_THRESHOLD = 0.3
-            if not context or all(c["score"] < ROUTING_SCORE_THRESHOLD for c in context):
-                log.warning(
-                    "routing_fallback_triggered",
-                    session_id=session_id,
-                    doc_type_filter=doc_type,
-                    threshold=ROUTING_SCORE_THRESHOLD,
-                )
-                with tracer.start_as_current_span("chroma_search_fallback"):
-                    context = _chroma_search(question)
-                chroma_query_total.labels(doc_type_filter="fallback").inc()
+        # ── 1. Query decomposition ────────────────────────────────────────────
+        if settings.ff_use_query_decomposition:
+            with tracer.start_as_current_span("query_decomposition"):
+                sub_queries = decompose_query(question)
         else:
-            with tracer.start_as_current_span("bm25_search"):
-                context = _bm25_search(question)
-            bm25_query_total.inc()
+            sub_queries = [question]
+
+        span.set_attribute("sub_queries_count", len(sub_queries))
+
+        all_chunks: list[dict] = []
+
+        for sub_query in sub_queries:
+            # ── 2. Retrieval ──────────────────────────────────────────────────
+            if settings.ff_use_chroma:
+                with tracer.start_as_current_span("detect_doc_type"):
+                    doc_type = _detect_doc_type(sub_query)
+                span.set_attribute("doc_type_filter", str(doc_type))
+
+                if settings.ff_use_hybrid_search:
+                    # Hybrid: ChromaDB (with routing) + BM25 via RRF
+                    _dt = doc_type  # capture for closure
+                    with tracer.start_as_current_span("hybrid_search"):
+                        chunks = hybrid_search(
+                            query=sub_query,
+                            chroma_search_fn=lambda q, n, dt=_dt: _chroma_search(
+                                q, doc_type_filter=dt, top_k=n
+                            ),
+                            bm25_search_fn=lambda q, n: _bm25_search(q, top_k=n),
+                            top_k=CANDIDATE_COUNT,
+                        )
+                    chroma_query_total.labels(doc_type_filter=str(doc_type)).inc()
+                    bm25_query_total.inc()
+                else:
+                    # Classic single-source search with score-threshold fallback
+                    with tracer.start_as_current_span("chroma_search"):
+                        chunks = _chroma_search(
+                            sub_query,
+                            doc_type_filter=doc_type,
+                            top_k=CANDIDATE_COUNT,
+                        )
+                    chroma_query_total.labels(doc_type_filter=str(doc_type)).inc()
+
+                    ROUTING_SCORE_THRESHOLD = 0.3
+                    if not chunks or all(c["score"] < ROUTING_SCORE_THRESHOLD for c in chunks):
+                        log.warning(
+                            "routing_fallback_triggered",
+                            session_id=session_id,
+                            doc_type_filter=doc_type,
+                            threshold=ROUTING_SCORE_THRESHOLD,
+                        )
+                        with tracer.start_as_current_span("chroma_search_fallback"):
+                            chunks = _chroma_search(sub_query, top_k=CANDIDATE_COUNT)
+                        chroma_query_total.labels(doc_type_filter="fallback").inc()
+            else:
+                with tracer.start_as_current_span("bm25_search"):
+                    chunks = _bm25_search(sub_query, top_k=CANDIDATE_COUNT)
+                bm25_query_total.inc()
+
+            # ── 3. Reranking ──────────────────────────────────────────────────
+            if settings.ff_use_reranking and chunks:
+                with tracer.start_as_current_span("reranking"):
+                    chunks = get_reranker().rerank(
+                        sub_query, chunks, top_k=settings.top_k_results
+                    )
+                span.set_attribute("chunks_after_rerank", len(chunks))
+
+            all_chunks.extend(chunks)
+
+        # ── 4. Deduplicate and limit ──────────────────────────────────────────
+        seen: set[int] = set()
+        context: list[dict] = []
+        for chunk in all_chunks:
+            cid = hash(chunk["content"])
+            if cid not in seen:
+                seen.add(cid)
+                context.append(chunk)
+            if len(context) == 10:
+                break
 
         history = session_memory.get(session_id) if settings.ff_use_session_memory else []
 
@@ -197,27 +266,37 @@ def retrieve_node(state: dict) -> dict:
         log.info(
             "retrieval_completed",
             session_id=session_id,
-            chunks_retrieved=len(context),
+            sub_queries=len(sub_queries),
+            total_candidates=len(all_chunks),
+            unique_chunks=len(context),
             latency_seconds=round(elapsed, 3),
             used_chroma=settings.ff_use_chroma,
+            used_hybrid=settings.ff_use_hybrid_search,
+            used_reranking=settings.ff_use_reranking,
         )
 
         return {**state, "context": context, "history": history}
 
 
-def _chroma_search(question: str, doc_type_filter: str = None) -> list[dict]:
+def _chroma_search(
+    question: str,
+    doc_type_filter: str = None,
+    top_k: int = None,
+) -> list[dict]:
     """
-    Embed the question and query ChromaDB for the top-K nearest chunks.
+    Embed the question and query ChromaDB for the nearest chunks.
 
     Args:
-        question: The user's query string.
-        doc_type_filter: Optional ChromaDB metadata filter, e.g. "troubleshooting".
-            When provided, restricts results to that corpus subset.
+        question:        The user's query string.
+        doc_type_filter: Optional ChromaDB metadata filter ("troubleshooting").
+        top_k:           Number of results; defaults to settings.top_k_results.
 
     Returns:
         List of dicts with keys: content, source, section_title, doc_type, score.
         Score is cosine similarity (1 - cosine distance).
     """
+    n = top_k if top_k is not None else settings.top_k_results
+
     client = _get_openai_client()
     response = client.embeddings.create(input=[question], model=settings.embedding_model)
     query_vector = response.data[0].embedding
@@ -226,7 +305,7 @@ def _chroma_search(question: str, doc_type_filter: str = None) -> list[dict]:
 
     query_params = {
         "query_embeddings": [query_vector],
-        "n_results": settings.top_k_results,
+        "n_results": n,
         "include": ["documents", "metadatas", "distances"],
     }
 
@@ -249,19 +328,22 @@ def _chroma_search(question: str, doc_type_filter: str = None) -> list[dict]:
     )]
 
 
-def _bm25_search(question: str) -> list[dict]:
+def _bm25_search(question: str, top_k: int = None) -> list[dict]:
     """
-    Keyword search via BM25 (Okapi) — used when ff_use_chroma is disabled.
+    Keyword search via BM25 (Okapi).
 
-    Loads the pre-built BM25 index from disk on first call and caches it in
-    memory. Works offline with zero external dependencies.
+    Args:
+        question: The user's query string.
+        top_k:    Number of results; defaults to settings.top_k_results.
     """
+    n = top_k if top_k is not None else settings.top_k_results
+
     data = _get_bm25_data()
     bm25 = data["bm25"]
     chunks = data["chunks"]
 
     scores = bm25.get_scores(question.lower().split())
-    top_indices = np.argsort(scores)[::-1][:settings.top_k_results]
+    top_indices = np.argsort(scores)[::-1][:n]
 
     return [{
         "content": chunks[i].content,
@@ -369,6 +451,23 @@ def generate_node(state: dict) -> dict:
         total_tokens = response.usage.total_tokens
         input_tokens = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens
+
+        # ── Citation validation ───────────────────────────────────────────────
+        if settings.ff_use_citation_validation:
+            with tracer.start_as_current_span("citation_validation") as cv_span:
+                from src.rag.citation_validator import get_validator
+                is_valid, unsupported = get_validator().validate(
+                    answer, state["context"], threshold=0.5
+                )
+                cv_span.set_attribute("citations_valid", is_valid)
+                cv_span.set_attribute("unsupported_claims", len(unsupported))
+                if not is_valid:
+                    log.warning(
+                        "answer_contains_unsupported_claims",
+                        session_id=state["session_id"],
+                        unsupported_count=len(unsupported),
+                        unsupported_preview=[s[:60] for s in unsupported[:3]],
+                    )
 
         # ── Cost tracking ─────────────────────────────────────────────────────
         cost_usd, _ = tracker.track_request(
