@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
+# Download spaCy language model required by presidio-analyzer for PII detection
+RUN python -m spacy download en_core_web_sm
 
 COPY src/ ./src/
 COPY scripts/ ./scripts/

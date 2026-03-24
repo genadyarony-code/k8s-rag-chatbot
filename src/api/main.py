@@ -19,10 +19,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import chromadb
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from openai import AsyncOpenAI
 from prometheus_client import CONTENT_TYPE_LATEST
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from src.agent.graph import graph
 from src.agent.memory import session_memory
@@ -38,6 +40,8 @@ from src.observability.metrics import (
     get_metrics,
     index_health,
 )
+from src.security.rate_limiter import limiter
+from src.security.validator import validate_chat_input
 
 log = get_logger(__name__)
 
@@ -85,12 +89,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="K8s RAG Chatbot", version="1.0.0", lifespan=lifespan)
 
+# Rate limiter — must be registered before any route decorators
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 
 @app.post("/chat")
-async def chat(request: ChatRequest):
+@limiter.limit(f"{settings.rate_limit_per_minute}/minute")
+async def chat(request: ChatRequest, req: Request):
     """
-    Main chat endpoint. Returns either a streaming SSE response or a
-    full JSON response depending on the ff_use_streaming feature flag.
+    Main chat endpoint with security validation and metrics instrumentation.
+
+    Returns either a streaming SSE response or a full JSON response depending
+    on the ff_use_streaming feature flag.
 
     Streaming (SSE) response format:
         data: {"token": "...", "done": false}  ← one per token
@@ -99,18 +110,28 @@ async def chat(request: ChatRequest):
     Batch response format: ChatResponse JSON.
     """
     start_time = time.time()
+
+    # ── Security validation ───────────────────────────────────────────────────
+    # validate_chat_input sanitizes, checks for prompt injection, and redacts PII.
+    # It raises HTTPException(400/413) on violations — re-raised automatically.
+    validated_question = validate_chat_input(
+        request.question,
+        request.session_id,
+        max_length=settings.max_input_length,
+    )
+
     chat_requests_total.labels(session_id=request.session_id).inc()
 
     log.info(
         "chat_request_received",
         session_id=request.session_id,
-        question_length=len(request.question),
+        question_length=len(validated_question),
     )
 
     try:
         if settings.ff_use_streaming:
             return StreamingResponse(
-                _stream_response(request),
+                _stream_response(validated_question, request.session_id),
                 media_type="text/event-stream",
             )
         else:
@@ -118,7 +139,7 @@ async def chat(request: ChatRequest):
             # block the event loop while waiting for the OpenAI response.
             result = await asyncio.to_thread(
                 graph.invoke,
-                {"question": request.question, "session_id": request.session_id},
+                {"question": validated_question, "session_id": request.session_id},
                 {"configurable": {"thread_id": request.session_id}},
             )
 
@@ -138,6 +159,8 @@ async def chat(request: ChatRequest):
                 session_id=request.session_id,
             )
 
+    except HTTPException:
+        raise
     except Exception as e:
         log.error(
             "chat_request_failed",
@@ -148,21 +171,26 @@ async def chat(request: ChatRequest):
         raise
 
 
-async def _stream_response(request: ChatRequest):
+async def _stream_response(validated_question: str, session_id: str):
     """
-    Async generator for the streaming chat path. Runs retrieval synchronously
-    (CPU-bound + fast local ops), then streams GPT tokens via SSE using
-    AsyncOpenAI so each token yield releases the event loop.
-    Sends a final event with sources and done=True when the stream ends.
+    Async generator for the streaming chat path.
+
+    Receives the already-validated question so that security checks are not
+    duplicated on every token yield. Runs retrieval synchronously (CPU-bound +
+    fast local ops), then streams GPT tokens via SSE using AsyncOpenAI.
+
+    Args:
+        validated_question: Sanitized + PII-redacted question
+        session_id: Session identifier
     """
     from src.agent.nodes import retrieve_node
     from src.agent.prompts import build_prompt
 
-    # Step 1: Retrieval (includes query routing + session history loading).
+    # Step 1: Retrieval (query routing + session history)
     # Wrapped in to_thread because ChromaDB and the embeddings call are sync.
     state = await asyncio.to_thread(
         retrieve_node,
-        {"question": request.question, "session_id": request.session_id},
+        {"question": validated_question, "session_id": session_id},
     )
 
     # Step 2: Generation
@@ -188,9 +216,8 @@ async def _stream_response(request: ChatRequest):
                 full_answer += token
                 yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
 
-        # Persist the complete answer to memory after the stream finishes
         if settings.ff_use_session_memory:
-            session_memory.add(request.session_id, request.question, full_answer)
+            session_memory.add(session_id, validated_question, full_answer)
 
     # Step 3: Send sources as the completion signal
     sources = list(set(c["source"] for c in state["context"]))
@@ -228,7 +255,6 @@ async def health():
 
     bm25_ok = Path("./bm25_index/bm25.pkl").exists()
 
-    # Update Prometheus gauges
     index_health.labels(index_type="chroma").set(1 if chroma_ok else 0)
     index_health.labels(index_type="bm25").set(1 if bm25_ok else 0)
 
@@ -267,7 +293,7 @@ async def readiness():
     Readiness probe for Kubernetes.
 
     Returns 200 only if the service can handle traffic.
-    Checks: index availability, OpenAI client initialization.
+    Checks: ChromaDB availability, OpenAI client initialization.
     """
     try:
         c = chromadb.PersistentClient(path=settings.chroma_db_path)

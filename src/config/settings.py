@@ -48,6 +48,20 @@ class Settings(BaseSettings):
     ff_use_session_memory: bool = True
     ff_use_streaming: bool = True
 
+    # ── Security ──────────────────────────────────────────────────────────────
+    # Maximum input length in characters (5K is sufficient for any K8s question)
+    max_input_length: int = 5000
+
+    # Individual security features can be disabled for dev / load-testing.
+    # Never disable in production without an explicit reason documented here.
+    security_enable_prompt_injection_check: bool = True
+    security_enable_pii_detection: bool = True
+    security_enable_rate_limiting: bool = True
+
+    # Rate limits enforced per session_id (fallback: client IP)
+    rate_limit_per_minute: int = 10
+    rate_limit_per_hour: int = 100
+
     # ConfigDict replaces the deprecated inner `class Config` (Pydantic V2)
     model_config = ConfigDict(env_file=".env", extra="ignore")
 
