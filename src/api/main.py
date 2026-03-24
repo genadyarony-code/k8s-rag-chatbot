@@ -31,11 +31,10 @@ from src.agent.memory import session_memory
 from src.api.schemas import ChatRequest, ChatResponse, HealthResponse
 from src.config.settings import settings
 from src.observability.logging_config import configure_logging, get_logger
+from src.cost_control.circuit_breaker import openai_breaker
 from src.observability.metrics import (
-    chat_cost_usd_total,
     chat_latency_seconds,
     chat_requests_total,
-    chat_tokens_total,
     feature_flag_status,
     get_metrics,
     index_health,
@@ -222,6 +221,36 @@ async def _stream_response(validated_question: str, session_id: str):
     # Step 3: Send sources as the completion signal
     sources = list(set(c["source"] for c in state["context"]))
     yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
+
+
+@app.get("/budget")
+async def budget_status():
+    """
+    Current token budget and daily cost status.
+
+    Useful for monitoring dashboards and alerting pipelines.
+    Returns live counters — no caching.
+    """
+    from src.cost_control.cost_tracker import get_cost_tracker
+    from src.cost_control.token_budget import get_token_budget
+
+    budget = get_token_budget()
+    tracker = get_cost_tracker()
+
+    return {
+        "token_budget": {
+            "global_limit": budget.global_daily_limit,
+            "global_used": budget._global_usage,
+            "global_remaining": budget.global_daily_limit - budget._global_usage,
+            "session_daily_limit": budget.session_daily_limit,
+            "per_request_limit": budget.per_request_limit,
+        },
+        "cost": tracker.get_stats(),
+        "circuit_breaker": {
+            "state": str(openai_breaker.current_state),
+            "fail_count": openai_breaker.fail_counter,
+        },
+    }
 
 
 @app.get("/metrics")

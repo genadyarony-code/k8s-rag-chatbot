@@ -62,6 +62,21 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 10
     rate_limit_per_hour: int = 100
 
+    # ── Cost Controls ─────────────────────────────────────────────────────────
+    # Token budgets — first line of defence against runaway usage
+    token_budget_session_daily: int = 100_000   # tokens per session per day
+    token_budget_global_daily: int = 1_000_000  # total tokens per day across all sessions
+    token_budget_per_request: int = 10_000      # maximum tokens estimated per single request
+
+    # Cost limits in USD — triggers warning log then degraded mode
+    cost_warning_threshold_usd: float = 10.0   # log a warning when daily cost exceeds this
+    cost_hard_limit_usd: float = 50.0          # block OpenAI calls when daily cost exceeds this
+
+    # Circuit breaker — prevents hammering a failing OpenAI endpoint
+    circuit_breaker_enabled: bool = True
+    circuit_breaker_failure_threshold: int = 5    # failures before opening
+    circuit_breaker_timeout_seconds: int = 60     # seconds to stay open before half-open test
+
     # ConfigDict replaces the deprecated inner `class Config` (Pydantic V2)
     model_config = ConfigDict(env_file=".env", extra="ignore")
 

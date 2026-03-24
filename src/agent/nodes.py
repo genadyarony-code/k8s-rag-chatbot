@@ -31,10 +31,16 @@ from openai import OpenAI
 from src.agent.memory import session_memory
 from src.agent.prompts import build_prompt
 from src.config.settings import settings
+from src.cost_control.circuit_breaker import (
+    CircuitBreakerError,
+    openai_breaker,
+    with_circuit_breaker,
+)
+from src.cost_control.cost_tracker import get_cost_tracker
+from src.cost_control.token_budget import get_token_budget
 from src.observability.logging_config import get_logger
 from src.observability.metrics import (
     bm25_query_total,
-    chat_cost_usd_total,
     chat_tokens_total,
     chroma_query_total,
     generation_latency_seconds,
@@ -249,13 +255,20 @@ def _bm25_search(question: str) -> list[dict]:
     } for i in top_indices]
 
 
+@with_circuit_breaker
+def _call_openai_completion(client: OpenAI, **kwargs):
+    """OpenAI completion call wrapped with the circuit breaker."""
+    return client.chat.completions.create(**kwargs)
+
+
 def generate_node(state: dict) -> dict:
     """
     LangGraph node — generation step.
 
-    Builds the full prompt from context + history, calls GPT-4o-mini,
-    logs token counts for cost monitoring, and persists the exchange to
-    session memory. If ff_use_openai is disabled, returns raw chunks instead.
+    Builds the full prompt from context + history, enforces token budgets and
+    daily cost limits, calls GPT-4o-mini through a circuit breaker, and
+    persists the exchange to session memory.
+    If ff_use_openai is disabled, returns raw chunks instead.
 
     Returns the updated state with 'answer' and 'sources' populated.
     """
@@ -264,29 +277,77 @@ def generate_node(state: dict) -> dict:
         return {**state, "answer": raw, "sources": [c["source"] for c in state["context"]]}
 
     messages = build_prompt(state["question"], state["context"], state["history"])
+    estimated_tokens = sum(len(_tokenizer.encode(m.get("content", ""))) for m in messages)
 
-    token_count = sum(len(_tokenizer.encode(m.get("content", ""))) for m in messages)
+    # ── Token budget check ────────────────────────────────────────────────────
+    budget = get_token_budget()
+    allowed, reason = budget.check_and_reserve(state["session_id"], estimated_tokens)
+    if not allowed:
+        log.error(
+            "request_blocked_by_budget",
+            session_id=state["session_id"],
+            estimated_tokens=estimated_tokens,
+            reason=reason,
+        )
+        return {**state, "answer": f"Daily token budget exceeded. {reason}", "sources": []}
+
+    # ── Daily cost limit check ────────────────────────────────────────────────
+    tracker = get_cost_tracker()
+    if not tracker.is_budget_available():
+        log.error(
+            "request_blocked_by_cost_limit",
+            session_id=state["session_id"],
+            daily_cost=tracker.get_stats()["daily_cost_usd"],
+        )
+        return {
+            **state,
+            "answer": "Daily cost limit exceeded. System is in degraded mode.",
+            "sources": [],
+        }
+
     log.info(
         "generation_started",
         session_id=state["session_id"],
-        input_tokens=token_count,
+        input_tokens=estimated_tokens,
     )
 
     start_time = time.time()
     client = _get_openai_client()
-    response = client.chat.completions.create(
-        model=settings.llm_model,
-        messages=messages,
-        temperature=0.1,
-        stream=False,
-    )
+
+    try:
+        response = _call_openai_completion(
+            client,
+            model=settings.llm_model,
+            messages=messages,
+            temperature=0.1,
+            stream=False,
+        )
+    except CircuitBreakerError:
+        log.error(
+            "openai_circuit_breaker_open",
+            session_id=state["session_id"],
+            breaker_state=str(openai_breaker.current_state),
+        )
+        return {
+            **state,
+            "answer": "OpenAI service temporarily unavailable. Please try again shortly.",
+            "sources": [],
+        }
 
     answer = response.choices[0].message.content
     total_tokens = response.usage.total_tokens
-    cost_usd = total_tokens * 0.00000015  # gpt-4o-mini pricing
+    input_tokens = response.usage.prompt_tokens
+    output_tokens = response.usage.completion_tokens
+
+    # ── Cost tracking ─────────────────────────────────────────────────────────
+    cost_usd, _ = tracker.track_request(
+        session_id=state["session_id"],
+        model=settings.llm_model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
     chat_tokens_total.labels(model=settings.llm_model).inc(total_tokens)
-    chat_cost_usd_total.inc(cost_usd)
 
     elapsed = time.time() - start_time
     generation_latency_seconds.observe(elapsed)
