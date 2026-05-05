@@ -1,0 +1,63 @@
+{
+  "version": "1.0",
+  "created_at": "2026-03-24",
+  "description": "Golden evaluation set for K8s RAG chatbot — covers concepts, troubleshooting, and comparison queries",
+  "test_cases": [
+    {
+      "id": "pod_basics_001",
+      "question": "What is a Kubernetes Pod?",
+      "expected_keywords": ["smallest deployable unit", "container", "shared"],
+      "expected_sources": ["k8s_in_action_ch1-10.pdf"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "crashloop_001",
+      "question": "How do I debug a CrashLoopBackOff?",
+      "expected_keywords": ["logs", "kubectl logs", "exit code"],
+      "expected_sources": ["k8s_troubleshooting.html"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "deployment_vs_stateful_001",
+      "question": "What is the difference between Deployments and StatefulSets?",
+      "expected_keywords": ["stateless", "stateful", "persistent", "identity"],
+      "expected_sources": ["k8s_in_action_ch1-10.pdf"],
+      "difficulty": "hard"
+    },
+    {
+      "id": "networking_001",
+      "question": "How does Kubernetes networking work?",
+      "expected_keywords": ["CNI", "pod network", "service"],
+      "expected_sources": ["k8s_in_action_ch1-10.pdf"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "imagepull_001",
+      "question": "What causes ImagePullBackOff and how do I fix it?",
+      "expected_keywords": ["image", "registry", "pull"],
+      "expected_sources": ["k8s_troubleshooting.html"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "resource_limits_001",
+      "question": "How do I set resource limits and requests for a Pod?",
+      "expected_keywords": ["requests", "limits", "CPU", "memory"],
+      "expected_sources": ["k8s_in_action_ch1-10.pdf"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "service_types_001",
+      "question": "What are the different types of Kubernetes Services?",
+      "expected_keywords": ["ClusterIP", "NodePort", "LoadBalancer"],
+      "expected_sources": ["k8s_in_action_ch1-10.pdf"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "configmap_secret_001",
+      "question": "What is the difference between ConfigMaps and Secrets?",
+      "expected_keywords": ["configuration", "sensitive", "base64"],
+      "expected_sources": ["k8s_in_action_ch1-10.pdf", "k8s_concepts.html"],
+      "difficulty": "medium"
+    }
+  ]
+}

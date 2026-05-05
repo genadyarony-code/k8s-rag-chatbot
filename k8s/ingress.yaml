@@ -1,0 +1,36 @@
+# Prerequisites:
+#   - nginx ingress controller installed in the cluster
+#   - cert-manager installed and a ClusterIssuer named "letsencrypt-prod" configured
+#
+# Quick install (minikube):
+#   minikube addons enable ingress
+#
+# Quick install (cloud):
+#   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.0/deploy/static/provider/cloud/deploy.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: chatbot-ingress
+  namespace: k8s-rag-chatbot
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"  # Allow time for LLM generation
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - chatbot.yourdomain.com
+      secretName: chatbot-tls
+  rules:
+    - host: chatbot.yourdomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: chatbot-api
+                port:
+                  number: 80

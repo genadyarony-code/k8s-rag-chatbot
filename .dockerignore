@@ -1,0 +1,17 @@
+# Data — mounted as volumes at runtime, not baked into the image
+chroma_db/
+bm25_index/
+data/raw/
+
+# Dev / test — not needed in production images
+tests/
+.pytest_cache/
+.env
+*.pyc
+__pycache__/
+
+# Docs and repo metadata
+*.md
+LICENSE
+.gitignore
+.github/

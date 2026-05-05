@@ -1,0 +1,83 @@
+groups:
+  - name: k8s_rag_chatbot_alerts
+    interval: 30s
+    rules:
+
+      # ── Latency ──────────────────────────────────────────────────────────────
+
+      - alert: HighP95Latency
+        expr: >
+          histogram_quantile(0.95, rate(chat_latency_seconds_bucket[5m])) > 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High P95 chat latency"
+          description: >
+            P95 latency is {{ $value | humanizeDuration }} (threshold: 10 s).
+            Check OpenAI response times and retrieval performance.
+
+      # ── Cost ─────────────────────────────────────────────────────────────────
+
+      - alert: CostWarningThreshold
+        expr: chat_cost_usd_total > 10
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Daily cost warning threshold exceeded"
+          description: >
+            Cumulative cost is ${{ $value | humanize }} (threshold: $10).
+            Review usage patterns and consider tightening token budgets.
+
+      - alert: CostHardLimit
+        expr: chat_cost_usd_total > 50
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CRITICAL: Daily cost hard limit exceeded"
+          description: >
+            Cumulative cost is ${{ $value | humanize }} (limit: $50).
+            The system should now be in degraded mode — OpenAI calls blocked.
+
+      # ── Index Health ─────────────────────────────────────────────────────────
+
+      - alert: ChromaDBUnhealthy
+        expr: index_health{index_type="chroma"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ChromaDB index is unhealthy"
+          description: >
+            The ChromaDB vector index reports as unavailable.
+            The system may be falling back to BM25 keyword search.
+
+      - alert: BothIndexesUnhealthy
+        expr: >
+          index_health{index_type="chroma"} == 0
+          and
+          index_health{index_type="bm25"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CRITICAL: All retrieval indexes are down"
+          description: >
+            Both ChromaDB and BM25 indexes are unavailable.
+            The chatbot cannot retrieve context and will return empty answers.
+
+      # ── Circuit Breaker ───────────────────────────────────────────────────────
+
+      - alert: OpenAICircuitBreakerOpen
+        expr: circuit_breaker_state{breaker="openai_api"} == 2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OpenAI circuit breaker is OPEN"
+          description: >
+            The OpenAI circuit breaker has opened after repeated failures.
+            New requests will receive a degraded response until recovery.
+            Breaker auto-resets after 60 s.

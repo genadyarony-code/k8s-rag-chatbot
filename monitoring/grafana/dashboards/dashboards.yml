@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: k8s-rag-chatbot
+    orgId: 1
+    folder: K8s RAG Chatbot
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards

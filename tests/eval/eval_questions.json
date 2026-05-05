@@ -1,0 +1,107 @@
+[
+  {
+    "id": "q01",
+    "question": "What is the difference between a Pod and a Deployment?",
+    "expected_doc_types": ["concepts", "book"],
+    "expected_keywords": ["replica", "restart", "controller", "template"],
+    "category": "concepts"
+  },
+  {
+    "id": "q02",
+    "question": "Why is my Pod in CrashLoopBackOff state?",
+    "expected_doc_types": ["troubleshooting"],
+    "expected_keywords": ["exit code", "logs", "kubectl describe", "restart"],
+    "category": "troubleshooting"
+  },
+  {
+    "id": "q03",
+    "question": "How do I set resource limits for a container?",
+    "expected_doc_types": ["book", "concepts"],
+    "expected_keywords": ["resources", "limits", "requests", "cpu", "memory"],
+    "category": "how-to"
+  },
+  {
+    "id": "q04",
+    "question": "What causes OOMKilled?",
+    "expected_doc_types": ["troubleshooting"],
+    "expected_keywords": ["memory", "limit", "OOMKilled", "killed"],
+    "category": "troubleshooting"
+  },
+  {
+    "id": "q05",
+    "question": "How does a Service expose a Deployment?",
+    "expected_doc_types": ["concepts", "book"],
+    "expected_keywords": ["selector", "port", "ClusterIP", "label"],
+    "category": "concepts"
+  },
+  {
+    "id": "q06",
+    "question": "What is the difference between a ConfigMap and a Secret?",
+    "expected_doc_types": ["concepts", "book"],
+    "expected_keywords": ["configmap", "secret", "base64", "env"],
+    "category": "concepts"
+  },
+  {
+    "id": "q07",
+    "question": "My Pod is stuck in Pending state, what should I check?",
+    "expected_doc_types": ["troubleshooting"],
+    "expected_keywords": ["resources", "node", "affinity", "taint", "events"],
+    "category": "troubleshooting"
+  },
+  {
+    "id": "q08",
+    "question": "How do I perform a rolling update?",
+    "expected_doc_types": ["book", "concepts"],
+    "expected_keywords": ["rolling", "update", "strategy", "maxSurge", "maxUnavailable"],
+    "category": "how-to"
+  },
+  {
+    "id": "q09",
+    "question": "What is a StatefulSet and when should I use it?",
+    "expected_doc_types": ["concepts", "book"],
+    "expected_keywords": ["statefulset", "persistent", "identity", "storage", "ordered"],
+    "category": "concepts"
+  },
+  {
+    "id": "q10",
+    "question": "Why is my Service not accessible?",
+    "expected_doc_types": ["troubleshooting"],
+    "expected_keywords": ["selector", "endpoint", "port", "dns", "describe"],
+    "category": "troubleshooting"
+  },
+  {
+    "id": "q11",
+    "question": "How do I configure liveness and readiness probes?",
+    "expected_doc_types": ["book", "concepts"],
+    "expected_keywords": ["liveness", "readiness", "probe", "httpGet", "exec"],
+    "category": "how-to"
+  },
+  {
+    "id": "q12",
+    "question": "What is a DaemonSet used for?",
+    "expected_doc_types": ["concepts"],
+    "expected_keywords": ["daemonset", "node", "every", "log", "monitoring"],
+    "category": "concepts"
+  },
+  {
+    "id": "q13",
+    "question": "How do I mount a PersistentVolume in a Pod?",
+    "expected_doc_types": ["book", "concepts"],
+    "expected_keywords": ["persistentvolume", "claim", "mount", "storage", "access"],
+    "category": "how-to"
+  },
+  {
+    "id": "q14",
+    "question": "My container is getting OOMKilled repeatedly, what do I do?",
+    "expected_doc_types": ["troubleshooting"],
+    "expected_keywords": ["memory", "limit", "request", "oomkilled", "increase"],
+    "category": "troubleshooting"
+  },
+  {
+    "id": "q15",
+    "question": "What is the role of the Kubernetes scheduler?",
+    "expected_doc_types": ["concepts"],
+    "expected_keywords": ["scheduler", "node", "affinity", "resource", "assign"],
+    "category": "concepts"
+  }
+]

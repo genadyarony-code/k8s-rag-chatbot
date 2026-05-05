@@ -1,0 +1,115 @@
+{
+  "id": null,
+  "uid": "k8s-rag-cost",
+  "title": "K8s RAG Chatbot — Cost & Budget",
+  "description": "Daily API spend, token usage, budget remaining, and per-request cost",
+  "tags": ["k8s-rag", "cost"],
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-24h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cumulative Daily Cost (USD)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "chat_cost_usd_total",
+          "legendFormat": "Cumulative Cost"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "vector(10)",
+          "legendFormat": "Warning Threshold ($10)"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "vector(50)",
+          "legendFormat": "Hard Limit ($50)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "color": { "mode": "palette-classic" } }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Budget Remaining (USD)",
+      "type": "gauge",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "clamp_min(50 - chat_cost_usd_total, 0)",
+          "legendFormat": "Remaining"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "min": 0,
+          "max": 50,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "yellow", "value": 10 },
+              { "color": "green", "value": 25 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Token Usage Rate by Model",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "rate(chat_tokens_total[5m])",
+          "legendFormat": "{{model}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Avg Cost per Request",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 8, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "rate(chat_cost_usd_total[5m]) / rate(chat_requests_total[5m])",
+          "legendFormat": "$/req"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD" }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Total Tokens (last 24 h)",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 8, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "increase(chat_tokens_total[24h])",
+          "legendFormat": "{{model}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    }
+  ]
+}

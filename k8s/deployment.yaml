@@ -1,0 +1,105 @@
+# Note on replicas: ChromaDB is single-writer.
+# With replicas > 1, all pods mount the same PVC read-only.
+# Only one pod should perform writes (ingestion). Reads are safe across pods.
+# For true horizontal scaling, replace ChromaDB with a client-server or
+# hosted vector database.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatbot-api
+  namespace: k8s-rag-chatbot
+  labels:
+    app: chatbot-api
+    version: "latest"
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0   # Zero-downtime rollouts
+  selector:
+    matchLabels:
+      app: chatbot-api
+  template:
+    metadata:
+      labels:
+        app: chatbot-api
+      annotations:
+        # Prometheus scraping
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Prefer spreading pods across nodes for availability
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: chatbot-api
+
+      containers:
+        - name: api
+          image: ghcr.io/genadyarony-code/k8s-rag-chatbot:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+
+          # Load all non-secret config from ConfigMap
+          envFrom:
+            - configMapRef:
+                name: chatbot-config
+
+          # Inject secrets individually so they never appear in ConfigMap
+          env:
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: chatbot-secrets
+                  key: OPENAI_API_KEY
+
+          # Resource budgets — tune based on profiling
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+
+          # Liveness: if the process hangs, restart the pod
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # Readiness: only send traffic when the index is loaded
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+
+          volumeMounts:
+            - name: chroma-data
+              mountPath: /app/chroma_db
+            - name: bm25-data
+              mountPath: /app/bm25_index
+
+      volumes:
+        - name: chroma-data
+          persistentVolumeClaim:
+            claimName: chroma-pvc
+        - name: bm25-data
+          persistentVolumeClaim:
+            claimName: bm25-pvc

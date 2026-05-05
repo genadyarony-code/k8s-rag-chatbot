@@ -1,0 +1,21 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# build-essential provides gcc, g++, make and C headers needed for packages
+# that compile C extensions (numpy, tiktoken, chroma-hnswlib)
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir -r requirements.txt
+# Download spaCy language model required by presidio-analyzer for PII detection
+RUN python -m spacy download en_core_web_sm
+
+COPY src/ ./src/
+COPY scripts/ ./scripts/
+COPY data/processed/ ./data/processed/
+
+# Single worker required: session memory lives in-process.
+# To scale horizontally, replace SessionMemory with a Redis backend first.
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
